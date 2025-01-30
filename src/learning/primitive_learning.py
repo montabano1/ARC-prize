@@ -31,27 +31,60 @@ class DynamicPrimitiveLearner:
         """Discover new primitive operations from successful solutions"""
         # Analyze solution to identify potential new primitives
         # Generate primitive prompt
-        prompt = f"""Analyze this task and solution to discover a new primitive operation:
+        prompt = f"""Analyze this task and solution to discover a new primitive operation.
+The primitive should be a focused, single-purpose transformation that can be applied to a grid.
 
-Task input: {json.dumps(task_data['input'], indent=2)}
-Task output: {json.dumps(task_data['output'], indent=2)}
-Solution steps: {json.dumps(solution, indent=2)}
+Input Grid:
+{json.dumps(task_data['input'], indent=2)}
 
-Return primitive in JSON format:
+Expected Output:
+{json.dumps(task_data['output'], indent=2)}
+
+Solution Steps:
+{json.dumps(solution, indent=2)}
+
+Instructions:
+1. Identify a single, focused transformation that helps achieve the output
+2. The primitive should be simple and reusable
+3. Include clear parameters that control the transformation
+4. Provide specific examples showing input->output
+5. Return the primitive in this exact JSON format:
 {{
     "primitive": {{
-        "id": "primitive_id",
-        "name": "primitive name",
-        "description": "what this primitive does",
-        "parameters": {{"param_name": "param description"}},
-        "implementation_guide": "how to implement this primitive",
-        "applicability": "when to use this primitive",
+        "id": "primitive_id",              # Unique identifier
+        "name": "Descriptive Name",        # Clear, descriptive name
+        "description": "What it does",     # Detailed explanation
+        "parameters": {{                   # Parameters that control the transformation
+            "param_name": "description"
+        }},
+        "implementation_guide": "Step by step implementation instructions",
+        "applicability": "When to use this primitive",
         "examples": [
-            "example usage 1",
-            "example usage 2"
+            "input: [[0,0],[0,0]] -> output: [[1,1],[1,1]] # Fill all with 1",
+            "input: [[1,1],[1,1]] -> output: [[0,0],[0,0]] # Fill all with 0"
         ]
     }}
-}}"""
+}}
+
+Example primitive for inverting values:
+{{
+    "primitive": {{
+        "id": "invert_values",
+        "name": "Invert Grid Values",
+        "description": "Inverts all values in the grid (0->1, 1->0)",
+        "parameters": {{
+            "target_value": "Value to invert from (0 or 1)",
+            "new_value": "Value to change to (0 or 1)"
+        }},
+        "implementation_guide": "1. Iterate through grid\\n2. Replace target_value with new_value",
+        "applicability": "When you need to flip all values in a region",
+        "examples": [
+            "input: [[0,1],[1,0]] -> output: [[1,0],[0,1]] # Complete inversion"
+        ]
+    }}
+}}
+
+Return your primitive definition in valid JSON format:"""
 
         max_retries = 3
         current_retry = 0

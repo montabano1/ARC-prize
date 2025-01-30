@@ -389,24 +389,39 @@ Return in this EXACT JSON format:
                     if primitive_id in self.primitive_learner.primitives:
                         primitive = self.primitive_learner.primitives[primitive_id]
                         # Generate prompt to apply primitive
-                        prompt = f"""Apply this primitive transformation:
+                        prompt = f"""Apply this primitive transformation to transform the input grid.
+You must return ONLY a valid JSON object with the 'output' key containing the transformed grid.
 
-Primitive:
+Primitive Definition:
 {json.dumps(primitive, indent=2)}
 
-Current State:
+Input Grid:
 {json.dumps(current_state, indent=2)}
 
 Parameters:
 {json.dumps(params, indent=2)}
 
-Return the transformed state in this EXACT format:
+Instructions:
+1. Apply the primitive's transformation to the input grid
+2. Return ONLY a JSON object in this exact format:
 {{
     "output": [
-        [0, 1],
-        [1, 0]
+        [int, int, ...],  # First row
+        [int, int, ...],  # Second row
+        ...               # Remaining rows
     ]
-}}"""
+}}
+
+Example Response:
+{{
+    "output": [
+        [1, 0, 1],
+        [0, 1, 0],
+        [1, 0, 1]
+    ]
+}}
+
+Return your response in valid JSON format:"""
 
                         response = await self.llm.get_completion(prompt, schema=JSONValidator.PRIMITIVE_OUTPUT_SCHEMA)
                         try:
@@ -420,14 +435,14 @@ Return the transformed state in this EXACT format:
                     # If primitive not found or failed to apply, try to discover it
                     if attempt == 0:  # Only try discovery on first attempt
                         logger.info(f"Primitive {primitive_id} not found, attempting to discover...")
-                        discovered = await self.primitive_learner.discover_primitive(
+                        primitive_item = await self.primitive_learner.discover_primitive(
                             {'input': current_state, 'output': step.get('expected_output')},
                             {'steps': [step]}
                         )
-                        if discovered:
+                        if primitive_item:
                             logger.info(f"Successfully discovered primitive {primitive_id}")
                             # Store the discovered primitive
-                            self.primitive_learner.primitives[primitive_id] = discovered['primitive']
+                            self.primitive_learner.primitives[primitive_id] = primitive_item
                             # Will try to apply it in next attempt
                         else:
                             logger.error(f"Failed to discover primitive {primitive_id}")
