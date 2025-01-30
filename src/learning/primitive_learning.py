@@ -66,20 +66,20 @@ Instructions:
     }}
 }}
 
-Example primitive for inverting values:
+Example primitive for border fill:
 {{
     "primitive": {{
-        "id": "invert_values",
-        "name": "Invert Grid Values",
-        "description": "Inverts all values in the grid (0->1, 1->0)",
+        "id": "fill_border",
+        "name": "Fill Border Values",
+        "description": "Sets all border cells (outer edges) of the grid to a specified value",
         "parameters": {{
-            "target_value": "Value to invert from (0 or 1)",
-            "new_value": "Value to change to (0 or 1)"
+            "border_value": "Value to set border cells to (0 or 1)"
         }},
-        "implementation_guide": "1. Iterate through grid\\n2. Replace target_value with new_value",
-        "applicability": "When you need to flip all values in a region",
+        "implementation_guide": "1. Get grid dimensions\\n2. Set first and last row to border_value\\n3. Set first and last column to border_value\\n4. Leave inner values unchanged",
+        "applicability": "When you need to create a border or frame around the grid",
         "examples": [
-            "input: [[0,1],[1,0]] -> output: [[1,0],[0,1]] # Complete inversion"
+            "input: [[0,0,0],[0,1,0],[0,0,0]] -> output: [[1,1,1],[1,1,1],[1,1,1]] # Fill border with 1s",
+            "input: [[1,1,1],[1,0,1],[1,1,1]] -> output: [[0,0,0],[0,0,0],[0,0,0]] # Fill border with 0s"
         ]
     }}
 }}
@@ -431,10 +431,7 @@ Return adapted primitive in this format:
         "parameters": {{"param_name": "param description"}},
         "implementation_guide": "how to implement this adapted primitive",
         "applicability": "when to use this adapted primitive",
-        "examples": [
-            "example usage 1",
-            "example usage 2"
-        ]
+        "adaptations": ["what was changed"]
     }}
 }}"""
 

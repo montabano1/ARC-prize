@@ -402,24 +402,30 @@ Parameters:
 {json.dumps(params, indent=2)}
 
 Instructions:
-1. Apply the primitive's transformation to the input grid
-2. Return ONLY a JSON object in this exact format:
+1. The output grid MUST have the EXACT same dimensions as the input grid
+2. Each cell must contain ONLY 0 or 1
+3. Apply the primitive's transformation carefully:
+   - Pay attention to border vs inner cells
+   - Preserve the grid structure
+   - Only modify cells that should be changed
+4. Return ONLY a JSON object in this exact format:
 {{
     "output": [
-        [int, int, ...],  # First row
-        [int, int, ...],  # Second row
-        ...               # Remaining rows
+        [int, int, ...],  # Each row must have same length as input
+        [int, int, ...],  # Values must be 0 or 1
+        ...               # Must have same number of rows as input
     ]
 }}
 
-Example Response:
-{{
-    "output": [
-        [1, 0, 1],
-        [0, 1, 0],
-        [1, 0, 1]
-    ]
-}}
+Example Input 3x3:
+[[0, 0, 0],
+ [0, 1, 0],
+ [0, 0, 0]]
+
+Example Output 3x3 (border fill):
+[[1, 1, 1],
+ [1, 1, 1],
+ [1, 1, 1]]
 
 Return your response in valid JSON format:"""
 
