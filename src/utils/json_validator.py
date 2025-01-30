@@ -2,6 +2,7 @@ from typing import Dict, Any, Optional, Tuple
 import json
 import jsonschema
 from jsonschema import validate, ValidationError
+import numpy as np
 
 class JSONValidator:
     """Validates and helps fix JSON responses from LLM"""
@@ -52,6 +53,31 @@ Original Request:
 
 Please provide a valid JSON response that matches the schema exactly."""
 
+    @staticmethod
+    def validate_example(example: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        """
+        Validate an example has the required input and output fields
+        Args:
+            example: Example dict to validate
+        Returns: (is_valid, error_message)
+        """
+        if not isinstance(example, dict):
+            return False, "Example must be a dictionary"
+            
+        if 'input' not in example:
+            return False, "Example missing 'input' field"
+            
+        if 'output' not in example:
+            return False, "Example missing 'output' field"
+            
+        if not isinstance(example['input'], (list, np.ndarray)):
+            return False, "Example input must be a list or numpy array"
+            
+        if not isinstance(example['output'], (list, np.ndarray)):
+            return False, "Example output must be a list or numpy array"
+            
+        return True, None
+
     # Common schemas
     CONCEPT_SCHEMA = {
         "type": "object",
@@ -79,6 +105,28 @@ Please provide a valid JSON response that matches the schema exactly."""
                 }
             }
         }
+    }
+
+    CONCEPT_VALIDATION_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "generalization_score": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0
+            },
+            "consistency_score": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0
+            },
+            "supports_examples": {
+                "type": "array",
+                "items": {"type": "boolean"}
+            },
+            "explanation": {"type": "string"}
+        },
+        "required": ["generalization_score", "consistency_score", "supports_examples", "explanation"]
     }
 
     PRIMITIVE_SCHEMA = {
@@ -198,6 +246,29 @@ Please provide a valid JSON response that matches the schema exactly."""
     }
 
     PRIMITIVE_SUGGESTIONS_SCHEMA = {
+        "type": "object",
+        "required": ["suggestions"],
+        "properties": {
+            "suggestions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["primitive_id", "confidence", "rationale"],
+                    "properties": {
+                        "primitive_id": {"type": "string"},
+                        "confidence": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1
+                        },
+                        "rationale": {"type": "string"}
+                    }
+                }
+            }
+        }
+    }
+
+    PRIMITIVE_SUGGESTION_SCHEMA = {
         "type": "object",
         "required": ["suggestions"],
         "properties": {
@@ -387,6 +458,45 @@ Please provide a valid JSON response that matches the schema exactly."""
                         },
                         "sum": {"type": "integer"}
                     }
+                }
+            }
+        }
+    }
+
+    CONTEXT_SCHEMA = {
+        "type": "object",
+        "required": ["input_shape", "input_values", "patterns", "constraints"],
+        "properties": {
+            "input_shape": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "minItems": 2,
+                "maxItems": 2
+            },
+            "input_values": {
+                "type": "array",
+                "items": {"type": "integer"}
+            },
+            "patterns": {
+                "type": "array",
+                "items": {"type": "string"}
+            },
+            "constraints": {
+                "type": "object",
+                "additionalProperties": {"type": "string"}
+            }
+        }
+    }
+
+    PRIMITIVE_OUTPUT_SCHEMA = {
+        "type": "object",
+        "required": ["output"],
+        "properties": {
+            "output": {
+                "type": "array",
+                "items": {
+                    "type": "array",
+                    "items": {"type": "integer"}
                 }
             }
         }

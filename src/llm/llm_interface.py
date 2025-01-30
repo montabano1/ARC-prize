@@ -3,19 +3,27 @@ from openai import OpenAI
 from dataclasses import dataclass
 import json
 from src.utils.json_validator import JSONValidator
+import logging
+import asyncio
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class LLMResponse:
     text: str
     confidence: float
+    is_valid: bool = True  # Default to True since we'll set it to False if validation fails
 
 class LLMInterface:
+    """Interface for interacting with LLM models"""
+    
     def __init__(self, api_key: str):
         """Initialize LLM interface with OpenAI API key."""
         self.client = OpenAI(api_key=api_key)
-        self.model = "gpt-4"
+        self.model = "gpt-4o-mini-2024-07-18"  # Restored original model name
+        logger.info(f"Initialized LLMInterface with model: {self.model}")
         
-    def analyze_pattern(self, task: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+    async def analyze_pattern(self, task: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
         """Analyze patterns in the task and return identified concepts."""
         try:
             # Check if we have multiple training examples
@@ -68,6 +76,7 @@ class LLMInterface:
                 f"Focus on patterns that are consistent across ALL examples and be very precise about value changes."
             )
             
+            print("\nMaking API call to OpenAI...")  # Show when we're actually making the call
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -76,6 +85,7 @@ class LLMInterface:
                 ],
                 temperature=0.7
             )
+            print("Received response from OpenAI")  # Show when we get the response
             
             # Access the response content correctly
             raw_text = response.choices[0].message.content if response.choices else ""
@@ -152,7 +162,7 @@ class LLMInterface:
             return patterns
             
         except Exception as e:
-            print(f"Error in pattern analysis: {str(e)}")
+            logger.error(f"Error in pattern analysis: {str(e)}")
             return {
                 'object': [],
                 'transformation': [],
@@ -160,11 +170,12 @@ class LLMInterface:
                 'abstract': []
             }
             
-    def validate_concept(self, concept: str, context: Dict[str, Any]) -> LLMResponse:
+    async def validate_concept(self, concept: str, context: Dict[str, Any]) -> LLMResponse:
         """Validate a concept using LLM."""
         try:
             prompt = self._create_validation_prompt(concept, context)
             
+            print("\nMaking API call to OpenAI...")  # Show when we're actually making the call
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -173,6 +184,7 @@ class LLMInterface:
                 ],
                 temperature=0.7
             )
+            print("Received response from OpenAI")  # Show when we get the response
             
             text = response.choices[0].message.content if response.choices else ""
             confidence = 0.8  # Default confidence
@@ -188,11 +200,11 @@ class LLMInterface:
                 elif 'low' in conf_value:
                     confidence = 0.5
                     
-            return LLMResponse(text=text, confidence=confidence)
+            return LLMResponse(text=text, confidence=confidence, is_valid=True)
             
         except Exception as e:
-            print(f"Error in concept validation: {str(e)}")
-            return LLMResponse(text="Error validating concept", confidence=0.0)
+            logger.error(f"Error in concept validation: {str(e)}")
+            return LLMResponse(text="Error validating concept", confidence=0.0, is_valid=False)
             
     def _create_validation_prompt(self, concept: str, context: Dict[str, Any]) -> str:
         """Create prompt for concept validation."""
@@ -211,7 +223,7 @@ class LLMInterface:
         """Format a grid for display in prompt."""
         return "\n".join(" ".join(str(cell) for cell in row) for row in grid)
 
-    def suggest_program_steps(self, pattern_info: Dict[str, str], 
+    async def suggest_program_steps(self, pattern_info: Dict[str, str], 
                             available_primitives: Dict[str, str]) -> List[Dict[str, Any]]:
         """Ask LLM to suggest program steps based on patterns and available primitives."""
         
@@ -277,6 +289,7 @@ class LLMInterface:
             f'4. Make sure all strings are properly escaped\n'
         )
         
+        print("\nMaking API call to OpenAI...")  # Show when we're actually making the call
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -285,13 +298,11 @@ class LLMInterface:
             ],
             temperature=0.7
         )
+        print("Received response from OpenAI")  # Show when we get the response
         
         # Parse response
         try:
-            print("\nDEBUG - LLM Response for program synthesis:")
             content = response.choices[0].message.content
-            print(content)
-            
             # Clean up the response to ensure valid JSON
             # Remove any trailing commas before closing braces/brackets
             content = content.replace(",}", "}")
@@ -309,113 +320,55 @@ class LLMInterface:
             result = json.loads(content)
             return result.get('steps', [])
         except (json.JSONDecodeError, KeyError, IndexError) as e:
-            print(f"\nDEBUG - Error parsing LLM response: {str(e)}")
+            logger.error(f"Error parsing LLM response: {str(e)}")
             return []
 
-    def get_completion(self, prompt: str, schema: Optional[Dict[str, Any]] = None, max_retries: int = 2) -> str:
-        """Get completion from LLM with JSON validation"""
+    async def get_completion(self, prompt: str, temperature: float = 0.7, schema: Optional[Dict[str, Any]] = None) -> str:
+        """Get completion from LLM"""
         try:
-            print("\nDEBUG - LLM get_completion:")
-            print(f"Prompt: {prompt[:200]}...")  # Print first 200 chars of prompt
-            print(f"Schema type: {schema['title'] if schema and 'title' in schema else 'No schema'}")
+            logger.info("Making API call to OpenAI...")
+            response = await asyncio.to_thread(
+                self.client.chat.completions.create,
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful AI assistant."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=temperature
+            )
+            logger.info("Received response from OpenAI")
             
-            # For testing, return mock responses based on the requested schema
-            mock_response = None
+            if not response.choices:
+                logger.error("No choices in OpenAI response")
+                return ""
+                
+            text = response.choices[0].message.content
+            logger.debug(f"Raw response text: {text[:100]}...")  # Log first 100 chars
             
-            if schema == JSONValidator.PRIMITIVE_SCHEMA:
-                print("DEBUG - Using PRIMITIVE_SCHEMA mock response")
-                mock_response = {
-                    "primitive": {
-                        "id": "test_primitive",
-                        "name": "Test Primitive",
-                        "description": "A test primitive for border pattern analysis",
-                        "parameters": {"param1": "int"},
-                        "implementation_guide": "Mock implementation",
-                        "applicability": "Testing only",
-                        "examples": ["test example"]
-                    }
-                }
-            elif schema == JSONValidator.STRATEGY_SCHEMA:
-                print("DEBUG - Using STRATEGY_SCHEMA mock response")
-                mock_response = {
-                    "strategy": {  
-                        "id": "test_strategy",
-                        "name": "Test Strategy",
-                        "description": "A test strategy for unit testing",
-                        "steps": [
-                            {"primitive": "test_primitive", "params": {}}
-                        ],
-                        "applicability": "Testing only",
-                        "confidence": 0.8
-                    }
-                }
-            elif schema == JSONValidator.CONCEPT_SCHEMA:
-                print("DEBUG - Using CONCEPT_SCHEMA mock response")
-                mock_response = {
-                    "concepts": [{
-                        "id": "test_concept",
-                        "name": "Border Pattern Concept",
-                        "description": "A concept focused on border patterns and transformations",
-                        "rules": ["Analyze border cells", "Track border changes"],
-                        "applicability": "When borders need transformation",
-                        "examples": ["example 1"],
-                        "confidence": 0.8
-                    }]
-                }
-            else:
-                print("DEBUG - Using default mock response")
-                mock_response = {
-                    "response": "Mock response for testing"
-                }
-
-            # Convert to string
-            response_str = json.dumps(mock_response)
-            print(f"DEBUG - Generated response: {response_str[:200]}...")  
-
-            # If no schema provided, just return the response
-            if not schema:
-                return response_str
-
-            # Validate response
-            is_valid, parsed_json, error = JSONValidator.validate_json(response_str, schema)
-            print(f"DEBUG - Validation result: valid={is_valid}, error={error if not is_valid else 'None'}")
+            # Strip markdown code blocks if present
+            if text.startswith("```"):
+                lines = text.split("\n")
+                # Remove first line (```json or similar)
+                lines = lines[1:]
+                # Find the closing ``` and remove everything after it
+                for i, line in enumerate(lines):
+                    if line.startswith("```"):
+                        lines = lines[:i]
+                        break
+                text = "\n".join(lines)
+                logger.debug(f"Stripped markdown blocks. New text: {text[:100]}...")
             
-            # If valid, return it
-            if is_valid:
-                return response_str
-
-            # If invalid and we have retries left, try to fix it
-            retries = max_retries
-            while not is_valid and retries > 0:
-                print(f"DEBUG - Attempting fix, {retries} retries remaining")
-                # Generate fix prompt
-                fix_prompt = JSONValidator.generate_fix_prompt(prompt, error, schema)
-                
-                # Get new completion
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": "You are an expert AI assistant focused on generating valid JSON responses. Always ensure your responses match the required schema exactly."},
-                        {"role": "user", "content": fix_prompt}
-                    ],
-                    temperature=0.2
-                )
-                
-                response_str = response.choices[0].message.content if response.choices else ""
-                print(f"DEBUG - Fix attempt response: {response_str[:200]}...")
-                
-                # Validate new response
-                is_valid, parsed_json, error = JSONValidator.validate_json(response_str, schema)
-                print(f"DEBUG - Fix validation result: valid={is_valid}, error={error if not is_valid else 'None'}")
-                if is_valid:
-                    return response_str
-                    
-                retries -= 1
-
-            # If we exhausted retries, return original response
-            print("DEBUG - Exhausted retries, returning original response")
-            return response_str
+            if schema:
+                logger.info("Validating response against schema...")
+                is_valid, result, error = JSONValidator.validate_json(text, schema)
+                if not is_valid:
+                    logger.error(f"Response validation failed: {error}")
+                    return ""
+                logger.info("Response validation successful")
+                return json.dumps(result)
+            
+            return text
             
         except Exception as e:
-            print(f"DEBUG - Error getting completion: {str(e)}")
-            return "{}"
+            logger.error(f"Error in get_completion: {str(e)}")
+            return ""

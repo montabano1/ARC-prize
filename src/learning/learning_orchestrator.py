@@ -1,16 +1,22 @@
-from typing import Dict, List, Any, Optional
 import json
-import time
-from src.learning.concept_formation import ConceptFormationEngine
-from src.learning.primitive_learning import DynamicPrimitiveLearner
-from src.strategy.meta_strategy import MetaStrategyEngine
-from src.utils.json_validator import JSONValidator
-from src.llm.llm_interface import LLMInterface
+import logging
+from typing import Dict, List, Any, Optional
+from ..learning.concept_formation import ConceptFormationEngine
+from ..learning.primitive_learning import DynamicPrimitiveLearner
+from ..strategy.meta_strategy import MetaStrategyEngine
+from ..utils.json_validator import JSONValidator
+from ..llm.llm_interface import LLMInterface
+import numpy as np
+import datetime
+
+logger = logging.getLogger(__name__)
 
 class LearningOrchestrator:
     """Orchestrates continuous learning across all components"""
     
     def __init__(self, llm: LLMInterface):
+        """Initialize learning system components."""
+        logger.info("Initializing LearningOrchestrator...")
         self.llm = llm
         self.concept_learner = ConceptFormationEngine(llm)
         self.primitive_learner = DynamicPrimitiveLearner(llm)
@@ -18,17 +24,14 @@ class LearningOrchestrator:
         self.learning_history = []
         self.feedback_requests = []
         self.feedback_history = []
+        logger.info("LearningOrchestrator initialized")
         
-    def learn_from_task(self, task_data: Dict[str, Any],
+    async def learn_from_task(self, task_data: Dict[str, Any],
                        solution: Optional[Dict[str, Any]] = None,
                        feedback: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Learn from a task attempt"""
-        # Validate task data
-        is_valid, _, error = JSONValidator.validate_json(json.dumps(task_data), JSONValidator.TASK_SCHEMA)
-        if not is_valid:
-            print(f"Invalid task data: {error}")
-            return {'learned_items': [], 'solution': None, 'feedback': None}
-
+        logger.info("Starting learn_from_task...")
+        
         # Initialize learning attempt
         attempt = {
             'task': task_data,
@@ -40,78 +43,112 @@ class LearningOrchestrator:
             'feedback': feedback or {'type': 'none', 'content': ''}
         }
         
-        # Learn concepts
-        concept_results = self.concept_learner.learn_from_example(
-            task_data, solution, feedback
-        )
-        attempt['learned_items'].extend(concept_results.get('learned_items', []))
-
-        # Discover primitives
-        if solution:
-            new_primitive = self.primitive_learner.discover_primitive(
-                task_data,
-                solution
-            )
-            if new_primitive:
-                attempt['learned_items'].append({
-                    'type': 'primitive',
-                    'item': new_primitive
-                })
-
-        # Update strategies
-        context = self._extract_context(task_data)
-        if solution:
-            success_rate = solution.get('success_rate', 0.0)
-            strategy_id = solution.get('strategy_id')
-            if strategy_id:
-                self.strategy_engine.update_performance(
-                    strategy_id, context, success_rate, feedback
-                )
+        if 'train' in task_data:
+            logger.info("Processing training examples...")
+            # Learn how to create strategies from training examples
+            logger.info("Learning strategy creation patterns...")
+            strategy_results = await self.strategy_engine.learn_strategy_creation(task_data['train'])
+            logger.info(f"Strategy results: {json.dumps(strategy_results, indent=2)}")
+            
+            # Add learned strategy patterns to attempt
+            attempt['learned_items'].extend([{
+                'type': 'strategy_pattern',
+                'content': pattern
+            } for pattern in strategy_results.get('patterns', [])])
+            
+            # Learn from individual examples
+            logger.info("Learning from individual examples...")
+            for example in task_data.get('train', []):
+                # Validate example data
+                try:
+                    is_valid, error = JSONValidator.validate_example(example)
+                    if not is_valid:
+                        logger.warning(f"Invalid example data: {error}")
+                        continue
+                except Exception as error:
+                    logger.warning(f"Invalid example data: {str(error)}")
+                    continue
+                    
+                logger.info(f"Learning from example: {json.dumps(example, indent=2)}")
                 
+                try:
+                    # Learn concepts from example
+                    concept_results = await self.concept_learner.learn_from_example(
+                        example, solution, feedback
+                    )
+                    attempt['learned_items'].extend([{
+                        'type': 'concept',
+                        'content': concept,
+                        'confidence': concept.get('confidence', 0.5)
+                    } for concept in concept_results.get('learned_items', [])])
+                    
+                    # Learn primitives from example
+                    primitive_results = await self.primitive_learner.learn_from_example(
+                        example, solution, feedback
+                    )
+                    attempt['learned_items'].extend([{
+                        'type': 'primitive',
+                        'content': primitive,
+                        'confidence': primitive.get('confidence', 0.5)
+                    } for primitive in primitive_results.get('learned_items', [])])
+                    
+                except Exception as e:
+                    logger.error(f"Error learning from example: {str(e)}")
+                    continue
+        
+        # Store learning attempt with UTC timestamp
+        self.learning_history.append({
+            'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            'attempt': attempt,
+            'feedback': feedback
+        })
+        
         # Check if feedback is needed
+        logger.info("Starting _check_feedback_needed...")
         feedback_needed = self._check_feedback_needed(attempt)
+        logger.info("Finished _check_feedback_needed")
+        
         if feedback_needed:
             self.feedback_requests.append({
-                'timestamp': time.time(),
+                'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 'task': task_data,
                 'attempt': attempt,
                 'feedback_type': feedback_needed['type'],
                 'feedback_query': feedback_needed['query']
             })
             
-        # Validate learning result
-        is_valid, _, error = JSONValidator.validate_json(json.dumps(attempt), JSONValidator.LEARNING_RESULT_SCHEMA)
-        if not is_valid:
-            print(f"Invalid learning result: {error}")
-            return {'learned_items': [], 'solution': None, 'feedback': None}
-
-        # Record learning history
-        self.learning_history.append(attempt)
-        
+        logger.info("Finished learn_from_task")
         return {
             'learned_items': attempt['learned_items'],
             'feedback_needed': feedback_needed is not None,
             'feedback_query': feedback_needed['query'] if feedback_needed else None
         }
         
-    def solve_task(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def solve_task(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
         """Solve a task using learned concepts and primitives"""
+        logger.info("Starting solve_task...")
+        
         try:
-            # Extract task features
-            context = self._extract_context(task_data)
+            # Extract context from task
+            logger.info("Starting _extract_context...")
+            context = await self._extract_context(task_data)
+            logger.info("Finished _extract_context")
             
-            # Get relevant concepts
-            concept_results = self.concept_learner.apply_learned_concepts(task_data)
+            # Get strategy for task
+            strategy = await self.strategy_engine.select_strategy(context)
             
-            # Get strategy based on context
-            strategy = self.strategy_engine.select_strategy(context)
+            # Apply concepts to get solution steps
+            concept_application = await self.concept_learner.apply_learned_concepts(task_data)
             
-            # Generate solution steps using strategy and concepts
-            solution_steps = self._generate_solution_steps(
+            # Get primitive suggestions
+            primitive_suggestions = await self.primitive_learner.get_primitive_suggestions(task_data)
+            
+            # Generate solution steps
+            solution_steps = await self._generate_solution_steps(
                 task_data,
-                strategy,
-                concept_results,
-                self.primitive_learner.get_applicable_primitives(task_data)
+                strategy or {},
+                concept_application,
+                primitive_suggestions
             )
             
             # Calculate success rate based on learning history
@@ -119,27 +156,36 @@ class LearningOrchestrator:
             base_success_rate = 0.7
             learning_bonus = min(0.2, 0.05 * len(self.learning_history))  # Cap at 0.2 bonus
             
+            logger.info("Finished solve_task")
             return {
+                'success': len(solution_steps) > 0,
                 'success_rate': base_success_rate + learning_bonus,
                 'steps': solution_steps,
-                'strategy_id': strategy.get('id')
+                'strategy': strategy,
+                'concepts': concept_application.get('concepts_used', []),
+                'primitives': primitive_suggestions,
+                'output': await self._apply_solution_steps(task_data['input'], solution_steps) if solution_steps else None
             }
             
         except Exception as e:
-            print(f"Error solving task: {str(e)}")
-            # Return base success rate even if we fail to generate steps
+            logger.error(f"Error solving task: {str(e)}")
             return {
+                'success': False,
                 'success_rate': 0.7,  # Base success rate
                 'steps': [],
-                'strategy_id': None
+                'strategy': None,
+                'concepts': [],
+                'primitives': [],
+                'output': None
             }
-
+            
     def incorporate_feedback(self, feedback: Dict[str, Any]) -> None:
         """Incorporate feedback into learning system"""
+        logger.info("Starting incorporate_feedback...")
         try:
             # Track feedback
             self.feedback_history.append({
-                'timestamp': time.time(),
+                'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 'feedback': feedback
             })
             
@@ -154,49 +200,92 @@ class LearningOrchestrator:
                 
             # Track what we learned
             self.learning_history.append({
-                'timestamp': time.time(),
+                'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 'event': 'feedback_incorporated',
                 'details': feedback
             })
 
         except Exception as e:
-            print(f"Error incorporating feedback: {str(e)}")
+            logger.error(f"Error incorporating feedback: {str(e)}")
             
-    def _extract_context(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def _extract_context(self, task_data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract context information from task data"""
+        logger.info("Starting _extract_context...")
+        
+        # Convert numpy arrays to lists for JSON serialization
+        if isinstance(task_data.get('input'), np.ndarray):
+            task_data['input'] = task_data['input'].tolist()
+        if isinstance(task_data.get('output'), np.ndarray):
+            task_data['output'] = task_data['output'].tolist()
+            
         prompt = f"""Analyze this task and extract context information:
 
-Task:
+Task Data:
 {json.dumps(task_data, indent=2)}
 
+Return context in this EXACT JSON format:
+{{
+    "input_shape": [0, 0],
+    "input_values": [0, 1],
+    "patterns": ["pattern1"],
+    "constraints": {{"constraint1": "value1"}}
+}}"""
+        
+        response = await self.llm.get_completion(prompt, schema=JSONValidator.CONTEXT_SCHEMA)
+        try:
+            result = json.loads(response)
+            logger.info("Finished _extract_context")
+            return result
+        except (json.JSONDecodeError, KeyError) as e:
+            logger.warning(f"Error parsing LLM response: {str(e)}")
+            return {
+                'input_shape': list(np.array(task_data['input']).shape),
+                'input_values': sorted(list(set(np.array(task_data['input']).flatten().tolist()))),
+                'patterns': [],
+                'constraints': {}
+            }
+            
+    async def _extract_unified_context(self, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Extract unified context from multiple examples"""
+        logger.info("Starting _extract_unified_context...")
+        prompt = f"""Analyze these examples and extract unified context information:
+
+Examples:
+{json.dumps(examples, indent=2)}
+
 Extract:
-1. Task type/category
-2. Complexity factors
-3. Required concepts
-4. Constraints
+1. Common patterns across all examples
+2. Transformation rules that work for all examples
+3. Invariant properties that hold across examples
+4. Key differences that the strategy must handle
 
 Return in JSON format:
 {{
     "task_type": "type of task",
     "complexity": 0.0-1.0,
-    "identified_patterns": ["list of patterns"],
+    "identified_patterns": ["list of patterns that work for ALL examples"],
     "required_concepts": ["list of required concepts"],
     "constraints": {{"constraint_name": "value"}}
-}}"""
+}}
+"""
         
-        response = self.llm.get_completion(prompt)
+        response = await self.llm.get_completion(prompt)
         try:
+            logger.info("Finished _extract_unified_context")
             return json.loads(response)
         except (json.JSONDecodeError, KeyError):
+            logger.warning("Error parsing LLM response")
             return {}
-            
+        
     def _check_feedback_needed(self, attempt: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Check if feedback is needed for this learning attempt"""
+        logger.info("Starting _check_feedback_needed...")
         # New concept with low confidence
         for item in attempt.get('learned_items', []):
             if item['type'] == 'concept':
-                concept = item['item']
+                concept = item['content']
                 if concept.get('confidence', 1.0) < 0.7:
+                    logger.info("Feedback needed for concept validation")
                     return {
                         'type': 'concept_validation',
                         'query': f"Please validate this newly discovered concept:\n{concept['description']}\n\nIs this a valid and useful concept for solving ARC tasks?"
@@ -205,20 +294,23 @@ Return in JSON format:
         # New primitive needs validation
         for item in attempt.get('learned_items', []):
             if item['type'] == 'primitive':
-                primitive = item['item']
+                primitive = item['content']
                 if primitive.get('confidence', 1.0) < 0.7:
+                    logger.info("Feedback needed for primitive validation")
                     return {
                         'type': 'primitive_validation',
                         'query': f"Please validate this newly discovered primitive:\n{primitive['description']}\n\nIs this a valid and useful primitive for solving ARC tasks?"
                     }
 
+        logger.info("Finished _check_feedback_needed")
         return None
         
-    def _generate_solution_steps(self, task_data: Dict[str, Any],
+    async def _generate_solution_steps(self, task_data: Dict[str, Any],
                                strategy: Dict[str, Any],
                                concept_application: Dict[str, Any],
                                primitive_suggestions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Generate solution steps using strategy, concepts, and primitives"""
+        logger.info("Starting _generate_solution_steps...")
         prompt = f"""Generate solution steps for this task:
 
 Task:
@@ -240,7 +332,7 @@ Generate detailed solution steps that:
 
 Return in this EXACT JSON format:
 {{
-    "id": "generated_strategy",
+    "id": "strategy_001",
     "name": "Generated Strategy",
     "description": "Strategy generated from concepts and primitives",
     "steps": [
@@ -255,19 +347,95 @@ Return in this EXACT JSON format:
         
         try:
             # Get response with schema validation
-            response = self.llm.get_completion(prompt, schema=JSONValidator.STRATEGY_SCHEMA)
+            response = await self.llm.get_completion(prompt, schema=JSONValidator.STRATEGY_SCHEMA)
             
             # Parse and validate
             is_valid, result, error = JSONValidator.validate_json(response, JSONValidator.STRATEGY_SCHEMA)
             if not is_valid:
-                print(f"Error parsing LLM response: {error}")
+                logger.warning(f"Error parsing LLM response: {error}")
                 # Return strategy steps as fallback
                 return strategy.get('steps', [])
                 
             # Return just the steps
+            logger.info("Finished _generate_solution_steps")
             return result.get('steps', [])
             
         except Exception as e:
-            print(f"Error generating solution steps: {str(e)}")
+            logger.error(f"Error generating solution steps: {str(e)}")
             # Return strategy steps as fallback
             return strategy.get('steps', [])
+
+    async def _apply_solution_steps(self, input_data: Any, solution_steps: List[Dict[str, Any]]) -> Any:
+        """Apply solution steps to input data to generate output"""
+        logger.info("Starting _apply_solution_steps...")
+        
+        if not solution_steps:
+            return input_data
+            
+        current_state = input_data
+        for step in solution_steps:
+            try:
+                # Get primitive from step
+                if not isinstance(step, dict) or 'primitive' not in step:
+                    logger.error(f"Invalid step format: {step}")
+                    continue
+                    
+                primitive_id = step['primitive']
+                params = step.get('params', {})
+                
+                # Try up to 2 times - once with existing primitive, once after discovering
+                for attempt in range(2):
+                    # Apply primitive transformation
+                    if primitive_id in self.primitive_learner.primitives:
+                        primitive = self.primitive_learner.primitives[primitive_id]
+                        # Generate prompt to apply primitive
+                        prompt = f"""Apply this primitive transformation:
+
+Primitive:
+{json.dumps(primitive, indent=2)}
+
+Current State:
+{json.dumps(current_state, indent=2)}
+
+Parameters:
+{json.dumps(params, indent=2)}
+
+Return the transformed state in this EXACT format:
+{{
+    "output": [
+        [0, 1],
+        [1, 0]
+    ]
+}}"""
+
+                        response = await self.llm.get_completion(prompt, schema=JSONValidator.PRIMITIVE_OUTPUT_SCHEMA)
+                        try:
+                            result = json.loads(response)
+                            current_state = result['output']
+                            break  # Successfully applied primitive
+                        except (json.JSONDecodeError, KeyError) as e:
+                            logger.error(f"Error applying primitive {primitive_id}: {str(e)}")
+                            continue
+                    
+                    # If primitive not found or failed to apply, try to discover it
+                    if attempt == 0:  # Only try discovery on first attempt
+                        logger.info(f"Primitive {primitive_id} not found, attempting to discover...")
+                        discovered = await self.primitive_learner.discover_primitive(
+                            {'input': current_state, 'output': step.get('expected_output')},
+                            {'steps': [step]}
+                        )
+                        if discovered:
+                            logger.info(f"Successfully discovered primitive {primitive_id}")
+                            # Store the discovered primitive
+                            self.primitive_learner.primitives[primitive_id] = discovered['primitive']
+                            # Will try to apply it in next attempt
+                        else:
+                            logger.error(f"Failed to discover primitive {primitive_id}")
+                            break  # Skip this step if discovery failed
+                            
+            except Exception as e:
+                logger.error(f"Error in solution step: {str(e)}")
+                continue
+                
+        logger.info("Finished _apply_solution_steps")
+        return current_state

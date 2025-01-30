@@ -27,7 +27,7 @@ class DynamicPrimitiveLearner:
         self.failed_attempts = []  # Failed primitive attempts
         self.feedback_threshold = 0.7
         
-    def discover_primitive(self, task_data: Dict[str, Any], solution: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def discover_primitive(self, task_data: Dict[str, Any], solution: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Discover new primitive operations from successful solutions"""
         # Analyze solution to identify potential new primitives
         # Generate primitive prompt
@@ -59,13 +59,13 @@ Return primitive in JSON format:
         while current_retry < max_retries:
             try:
                 # Get LLM response with schema validation
-                response = self.llm.get_completion(prompt, schema=JSONValidator.PRIMITIVE_SCHEMA)
+                response = await self.llm.get_completion(prompt, schema=JSONValidator.PRIMITIVE_SCHEMA)
                 is_valid, result, error = JSONValidator.validate_json(response, JSONValidator.PRIMITIVE_SCHEMA)
                 
                 if not is_valid:
                     # Generate fix prompt and retry
                     fix_prompt = JSONValidator.generate_fix_prompt(prompt, error, JSONValidator.PRIMITIVE_SCHEMA)
-                    response = self.llm.get_completion(fix_prompt, schema=JSONValidator.PRIMITIVE_SCHEMA)
+                    response = await self.llm.get_completion(fix_prompt, schema=JSONValidator.PRIMITIVE_SCHEMA)
                     is_valid, result, error = JSONValidator.validate_json(response, JSONValidator.PRIMITIVE_SCHEMA)
                     
                     if not is_valid:
@@ -99,26 +99,15 @@ Return primitive in JSON format:
                     current_retry += 1
                     continue
 
-                # Track primitive evolution
-                if primitive['id'] not in self.primitives:
-                    self.primitives[primitive['id']] = primitive_item
-                    self.evolution_history[primitive['id']] = [{
-                        'timestamp': time.time(),
-                        'event': 'created',
-                        'details': primitive_item
-                    }]
-
-                # Return full primitive with all fields
                 return primitive_item
-                
+
             except Exception as e:
-                print(f"Error discovering primitive (attempt {current_retry + 1}): {str(e)}")
+                print(f"Error discovering primitive: {str(e)}")
                 current_retry += 1
-        
-        print("Failed to discover primitive after all retries")
+                
         return None
-            
-    def evaluate_primitive(self, primitive_id: str,
+
+    async def evaluate_primitive(self, primitive_id: str,
                          performance: float,
                          context: Dict[str, Any]) -> None:
         """Evaluate primitive performance and trigger adaptation if needed"""
@@ -141,9 +130,9 @@ Return primitive in JSON format:
         if len(evolution) >= 5:
             recent_performance = [e['details']['performance'] for e in evolution[-5:]]
             if np.mean(recent_performance) < 0.7:
-                self._adapt_primitive(primitive_id)
+                await self._adapt_primitive(primitive_id)
                 
-    def combine_primitives(self, primitives: List[str],
+    async def combine_primitives(self, primitives: List[str],
                          task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Try to create new primitive by combining existing ones"""
         primitive_details = []
@@ -176,7 +165,7 @@ Return in JSON format:
     }}
 }}"""
         
-        response = self.llm.get_completion(prompt, schema=JSONValidator.COMBINED_PRIMITIVE_SCHEMA)
+        response = await self.llm.get_completion(prompt, schema=JSONValidator.COMBINED_PRIMITIVE_SCHEMA)
         try:
             result = json.loads(response)
             new_primitive = result['combined_primitive']
@@ -201,7 +190,278 @@ Return in JSON format:
         except (json.JSONDecodeError, KeyError):
             return None
             
-    def _adapt_primitive(self, primitive_id: str) -> None:
+    async def get_primitive_suggestions(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Get primitive suggestions for a task"""
+        # Analyze task and find relevant primitives
+        available_primitives = list(self.primitives.values())
+        
+        prompt = f"""Suggest primitives for this task:
+
+Task:
+{json.dumps(task, indent=2)}
+
+Available Primitives:
+{json.dumps(available_primitives, indent=2)}
+
+Consider:
+1. Direct matches based on task requirements
+2. Combinations that might work together
+3. Primitives that might need adaptation
+
+Return in JSON format:
+{{
+    "suggestions": [
+        {{
+            "primitive_id": "id",
+            "confidence": 0.0-1.0,
+            "rationale": "why this primitive is suitable"
+        }}
+    ]
+}}"""
+        
+        response = await self.llm.get_completion(prompt, schema=JSONValidator.PRIMITIVE_SUGGESTION_SCHEMA)
+        try:
+            result = json.loads(response)
+            
+            # Filter suggestions by confidence
+            suggestions = [
+                sugg for sugg in result['suggestions']
+                if sugg['confidence'] > 0.7
+            ]
+            
+            # Try to find combinations for high-confidence primitives
+            high_conf_primitives = [sugg['primitive_id'] for sugg in suggestions if sugg['confidence'] > 0.8]
+            if len(high_conf_primitives) >= 2:
+                new_primitive = await self.combine_primitives(high_conf_primitives[:2], task)
+                if new_primitive:
+                    suggestions.append({
+                        'primitive_id': new_primitive['id'],
+                        'confidence': 0.8,  # Default score for combinations
+                        'rationale': f"Combined primitive created from {', '.join(high_conf_primitives[:2])}"
+                    })
+                    
+            return suggestions
+            
+        except (json.JSONDecodeError, KeyError) as e:
+            print(f"Error getting primitive suggestions: {str(e)}")
+            return []
+
+    async def get_applicable_primitives(self, task_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Get primitives that are applicable to this task"""
+        applicable_primitives = []
+        
+        # Generate prompt to analyze task and find applicable primitives
+        prompt = f"""Analyze this task and determine which primitives would be applicable:
+
+Task:
+{json.dumps(task_data, indent=2)}
+
+Available primitives:
+{json.dumps(list(self.primitives.values()), indent=2)}
+
+Return list of applicable primitives with explanations:
+{{
+    "applicable_primitives": [
+        {{
+            "primitive_id": "id of applicable primitive",
+            "applicability_score": 0.0-1.0,
+            "explanation": "why this primitive is applicable"
+        }}
+    ]
+}}"""
+
+        try:
+            response = await self.llm.get_completion(prompt)
+            result = json.loads(response)
+            
+            # Get full primitive details for each applicable primitive
+            for item in result.get('applicable_primitives', []):
+                primitive_id = item['primitive_id']
+                if primitive_id in self.primitives:
+                    primitive = self.primitives[primitive_id].copy()
+                    primitive['applicability_score'] = item['applicability_score']
+                    primitive['applicability_explanation'] = item['explanation']
+                    applicable_primitives.append(primitive)
+                    
+            return sorted(applicable_primitives, 
+                        key=lambda x: x.get('applicability_score', 0),
+                        reverse=True)
+                        
+        except Exception as e:
+            print(f"Error finding applicable primitives: {str(e)}")
+            return []
+
+    async def learn_from_example(self, task_data: Dict[str, Any],
+                         solution: Optional[Dict[str, Any]] = None,
+                         feedback: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Learn primitive operations from an example"""
+        learned_items = []
+        
+        # First try to discover new primitives
+        if solution:
+            primitive = await self.discover_primitive(task_data, solution)
+            if primitive:
+                learned_items.append({
+                    'type': 'primitive',
+                    'content': primitive,
+                    'confidence': primitive.get('confidence', 0.5)
+                })
+                
+        # Then try to combine existing primitives
+        if len(self.primitives) >= 2:
+            primitive_ids = list(self.primitives.keys())[:2]  # Start with just 2 primitives
+            combined = await self.combine_primitives(primitive_ids, task_data)
+            if combined:
+                learned_items.append({
+                    'type': 'primitive_combination',
+                    'content': combined,
+                    'confidence': combined.get('confidence', 0.5)
+                })
+                
+        # Get suggestions for primitive usage
+        suggestions = await self.get_primitive_suggestions(task_data)
+        if suggestions:
+            learned_items.append({
+                'type': 'primitive_suggestions',
+                'content': suggestions,
+                'confidence': 0.8  # High confidence since these are based on existing primitives
+            })
+            
+        return {
+            'learned_items': learned_items,
+            'feedback_needed': len(learned_items) > 0 and any(item['confidence'] < self.feedback_threshold for item in learned_items)
+        }
+
+    async def _track_evolution(self, primitive: Dict[str, Any],
+                        solution: Optional[Dict[str, Any]] = None,
+                        feedback: Optional[Dict[str, Any]] = None) -> None:
+        """Track how a primitive evolves"""
+        if primitive['id'] not in self.evolution_history:
+            self.evolution_history[primitive['id']] = PrimitiveEvolution(
+                primitive_id=primitive['id'],
+                versions=[primitive],
+                performance_history=[],
+                usage_contexts=[],
+                adaptations=[]
+            )
+            
+        evolution = self.evolution_history[primitive['id']]
+        
+        # Add solution performance
+        if solution:
+            evolution.performance_history.append(solution.get('success_rate', 0.0))
+            evolution.usage_contexts.append({
+                'task': solution.get('task', {}),
+                'steps': solution.get('steps', []),
+                'timestamp': time.time()
+            })
+            
+        # Add feedback
+        if feedback:
+            evolution.adaptations.append({
+                'feedback': feedback,
+                'timestamp': time.time()
+            })
+            
+        # Check if adaptation needed
+        if len(evolution.performance_history) >= 5:
+            recent_performance = evolution.performance_history[-5:]
+            if np.mean(recent_performance) < 0.7:
+                adaptation = await self._generate_adaptation(primitive, {
+                    'trigger': 'poor_performance',
+                    'performance': recent_performance
+                })
+                if adaptation:
+                    evolution.versions.append(adaptation)
+                    evolution.adaptations.append({
+                        'trigger': 'poor_performance',
+                        'adaptation': adaptation
+                    })
+                    
+    async def _generate_adaptation(self, primitive: Dict[str, Any],
+                           trigger: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Generate adaptation for a primitive"""
+        prompt = f"""This primitive needs adaptation:
+
+Primitive:
+{json.dumps(primitive, indent=2)}
+
+Trigger:
+{json.dumps(trigger, indent=2)}
+
+Return adapted primitive in this format:
+{{
+    "primitive": {{
+        "id": "{primitive['id']}_v{len(self.evolution_history[primitive['id']].versions) + 1}",
+        "name": "adapted primitive name",
+        "description": "what this adapted primitive does",
+        "parameters": {{"param_name": "param description"}},
+        "implementation_guide": "how to implement this adapted primitive",
+        "applicability": "when to use this adapted primitive",
+        "examples": [
+            "example usage 1",
+            "example usage 2"
+        ]
+    }}
+}}"""
+
+        try:
+            response = await self.llm.get_completion(prompt, schema=JSONValidator.PRIMITIVE_SCHEMA)
+            result = json.loads(response)
+            return result['primitive']
+        except Exception as e:
+            print(f"Error generating adaptation: {str(e)}")
+            return None
+
+    async def _check_feedback_needed(self, primitives: List[Dict[str, Any]]) -> bool:
+        """Check if human feedback is needed"""
+        for primitive in primitives:
+            evolution = self.evolution_history.get(primitive['id'])
+            if evolution:
+                # Check recent performance
+                if len(evolution.performance_history) >= 3:
+                    recent_performance = evolution.performance_history[-3:]
+                    if np.mean(recent_performance) < self.feedback_threshold:
+                        return True
+                        
+                # Check adaptation history
+                if len(evolution.adaptations) >= 2:
+                    recent_adaptations = evolution.adaptations[-2:]
+                    if all('poor_performance' in adapt['trigger'] for adapt in recent_adaptations):
+                        return True
+                        
+        return False
+
+    async def _apply_feedback(self, primitives: List[Dict[str, Any]], 
+                       feedback: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Apply feedback to primitives"""
+        updated_primitives = []
+        for primitive in primitives:
+            try:
+                # Generate improvement prompt
+                prompt = f"""Apply this feedback to improve the primitive:
+
+Primitive:
+{json.dumps(primitive, indent=2)}
+
+Feedback:
+{json.dumps(feedback, indent=2)}
+
+Return improved primitive in the same format as the input."""
+
+                response = await self.llm.get_completion(prompt, schema=JSONValidator.PRIMITIVE_SCHEMA)
+                result = json.loads(response)
+                
+                if result.get('primitive'):
+                    updated_primitives.append(result['primitive'])
+                    
+            except Exception as e:
+                print(f"Error applying feedback: {str(e)}")
+                continue
+                
+        return updated_primitives
+
+    async def _adapt_primitive(self, primitive_id: str) -> None:
         """Adapt a primitive based on performance history"""
         if primitive_id not in self.primitives:
             return
@@ -234,7 +494,7 @@ Suggest adaptations in JSON format:
     }}
 }}"""
         
-        response = self.llm.get_completion(prompt, schema=JSONValidator.ADAPTED_PRIMITIVE_SCHEMA)
+        response = await self.llm.get_completion(prompt, schema=JSONValidator.ADAPTED_PRIMITIVE_SCHEMA)
         try:
             result = json.loads(response)
             adapted = result['adapted_primitive']
@@ -249,111 +509,3 @@ Suggest adaptations in JSON format:
             
         except (json.JSONDecodeError, KeyError):
             pass
-            
-    def get_primitive_suggestions(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Get primitive suggestions for a task"""
-        # Analyze task and find relevant primitives
-        available_primitives = list(self.primitives.values())
-        
-        prompt = f"""Suggest primitives for this task:
-
-Task:
-{json.dumps(task, indent=2)}
-
-Available Primitives:
-{json.dumps(available_primitives, indent=2)}
-
-Consider:
-1. Direct matches based on task requirements
-2. Combinations that might work together
-3. Primitives that might need adaptation
-
-Return in JSON format:
-{{
-    "suggestions": [
-        {{
-            "primitive_id": "id",
-            "relevance_score": 0.0-1.0,
-            "usage_suggestion": "how to use it",
-            "potential_adaptations": ["possible adaptations needed"]
-        }}
-    ],
-    "combination_suggestions": [
-        {{
-            "primitive_ids": ["id1", "id2"],
-            "combination_rationale": "why combine these"
-        }}
-    ]
-}}"""
-        
-        response = self.llm.get_completion(prompt, schema=JSONValidator.PRIMITIVE_SUGGESTIONS_SCHEMA)
-        try:
-            result = json.loads(response)
-            
-            # Filter suggestions by relevance
-            suggestions = [
-                sugg for sugg in result['suggestions']
-                if sugg['relevance_score'] > 0.7
-            ]
-            
-            # Add combination suggestions
-            for combo in result.get('combination_suggestions', []):
-                primitives = combo['primitive_ids']
-                new_primitive = self.combine_primitives(primitives, task)
-                if new_primitive:
-                    suggestions.append({
-                        'primitive_id': new_primitive['id'],
-                        'relevance_score': 0.8,  # Default score for combinations
-                        'usage_suggestion': f"Use this combined primitive: {new_primitive['description']}",
-                        'potential_adaptations': []
-                    })
-                    
-            return suggestions
-            
-        except (json.JSONDecodeError, KeyError):
-            return []
-
-    def get_applicable_primitives(self, task_data: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Get primitives that are applicable to this task"""
-        applicable_primitives = []
-        
-        # Generate prompt to analyze task and find applicable primitives
-        prompt = f"""Analyze this task and determine which primitives would be applicable:
-
-Task:
-{json.dumps(task_data, indent=2)}
-
-Available primitives:
-{json.dumps(list(self.primitives.values()), indent=2)}
-
-Return list of applicable primitives with explanations:
-{{
-    "applicable_primitives": [
-        {{
-            "primitive_id": "id of applicable primitive",
-            "applicability_score": 0.0-1.0,
-            "explanation": "why this primitive is applicable"
-        }}
-    ]
-}}"""
-
-        try:
-            response = self.llm.get_completion(prompt)
-            result = json.loads(response)
-            
-            # Get full primitive details for each applicable primitive
-            for item in result.get('applicable_primitives', []):
-                primitive_id = item['primitive_id']
-                if primitive_id in self.primitives:
-                    primitive = self.primitives[primitive_id].copy()
-                    primitive['applicability_score'] = item['applicability_score']
-                    primitive['applicability_explanation'] = item['explanation']
-                    applicable_primitives.append(primitive)
-                    
-            return sorted(applicable_primitives, 
-                        key=lambda x: x.get('applicability_score', 0),
-                        reverse=True)
-                        
-        except Exception as e:
-            print(f"Error finding applicable primitives: {str(e)}")
-            return []

@@ -1,396 +1,273 @@
-from typing import Dict, List, Any, Optional, Tuple, Set
-import numpy as np
-from dataclasses import dataclass
 import json
-from src.dsl.primitives import DSLPrimitive
-from src.llm.llm_interface import LLMInterface
-from src.utils.json_validator import JSONValidator
-from src.utils.validators import SystemValidators, ValidationError
+import logging
+from typing import Dict, Any, List, Optional, Set
+from ..llm.llm_interface import LLMInterface
+from ..utils.json_validator import JSONValidator
+import numpy as np
 
-@dataclass
+logger = logging.getLogger(__name__)
+
 class Strategy:
-    """Represents a problem-solving strategy"""
-    id: str
-    name: str
-    description: str
-    components: List[str]  # List of primitive IDs or sub-strategies
-    context: Dict[str, Any]  # When this strategy is applicable
-    performance: Dict[str, float]  # Historical performance metrics
-    creation_method: str  # How this strategy was created (composed/discovered/evolved)
-
-@dataclass
-class Context:
-    """Task context information"""
-    task_type: str  # e.g., "transformation", "pattern_completion"
-    complexity: float
-    identified_patterns: List[Dict[str, Any]]
-    required_concepts: List[str]
-    constraints: Dict[str, Any]
+    def __init__(self, id: str, name: str, description: str, steps: List[Dict[str, Any]], 
+                 applicability: str, confidence: float, context: Dict[str, Any]):
+        self.id = id
+        self.name = name
+        self.description = description
+        self.steps = steps
+        self.applicability = applicability
+        self.confidence = confidence
+        self.context = context
+        self.performance = []
 
 class MetaStrategyEngine:
-    """Manages strategy selection, composition, and evolution"""
+    """Learns how to create and evolve effective strategies"""
     
     def __init__(self, llm: LLMInterface):
+        """Initialize meta strategy engine"""
+        logger.info("Initializing MetaStrategyEngine...")
         self.llm = llm
         self.strategies: Dict[str, Strategy] = {}
         self.performance_history: Dict[str, List[float]] = {}
-        self.context_history: List[Context] = []
+        self.context_history: List[Dict[str, Any]] = []
         self.adaptation_threshold = 0.7  # Performance threshold for adaptation
         self.used_strategy_ids: Set[str] = set()
-
-    def select_strategy(self, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Select best strategy for context"""
-        try:
-            print("\nDEBUG - MetaStrategyEngine select_strategy:")
-            print(f"Context: {json.dumps(context, indent=2)}")
-            
-            # Generate unique strategy ID
-            strategy_id = f"strategy_{len(self.used_strategy_ids)}"
-            while strategy_id in self.used_strategy_ids:
-                strategy_id = f"strategy_{len(self.used_strategy_ids) + 1}"
-            
-            # Track this ID
-            self.used_strategy_ids.add(strategy_id)
+        self.strategy_patterns: List[Dict[str, Any]] = []  # Patterns about what makes strategies successful
+        logger.info("MetaStrategyEngine initialized")
+        
+    async def learn_strategy_creation(self, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Learn patterns about how to create effective strategies"""
+        logger.info("Starting learn_strategy_creation...")
+        
+        # Generate strategies for each example individually
+        logger.info("Generating strategies for examples...")
+        strategies_by_example = []
+        for example in examples:
+            # Convert numpy arrays to lists
+            if isinstance(example.get('input'), np.ndarray):
+                example['input'] = example['input'].tolist()
+            if isinstance(example.get('output'), np.ndarray):
+                example['output'] = example['output'].tolist()
                 
-            print(f"DEBUG - Generated strategy_id: {strategy_id}")
-
-            # Check if we have poor performing strategies to learn from
-            if hasattr(self, 'poor_performing_strategies'):
-                poor_strategies = [
-                    self.strategies[s_id] for s_id in self.poor_performing_strategies
-                ]
-            else:
-                poor_strategies = []
-            print(f"DEBUG - Found {len(poor_strategies)} poor performing strategies")
-
-            # Generate strategy based on context and past performance
-            prompt = f"""Generate a strategy for this context:
-
-Context:
-{json.dumps(context, indent=2)}
-
-Past Strategies Performance:
-{json.dumps([{
-    'strategy': s.name,
-    'performance': s.performance,
-    'context': s.context
-} for s in self.strategies.values()], indent=2)}
-
-Poor Strategies:
-{json.dumps([{
-    'strategy': s.name,
-    'performance': s.performance,
-    'error': s.feedback.get('error', '') if hasattr(s, 'feedback') else ''
-} for s in poor_strategies], indent=2)}
-
-Instructions:
-1. If there are poor performing strategies, analyze their failures and generate a more effective strategy
-2. Focus on choosing the most appropriate primitives and steps for the task
-3. Prefer simpler solutions if they can achieve the same result
-4. Consider both the task context and past performance when selecting primitives
-
-Return strategy in JSON format:
-{{
-    "strategy": {{
-        "id": "{strategy_id}",
-        "name": "strategy name",
-        "description": "detailed explanation of strategy and why it should work better than previous attempts",
-        "steps": [
-            {{
-                "primitive": "primitive_id",
-                "params": {{"param": "value"}}
-            }}
-        ],
-        "applicability": "when to use this strategy",
-        "confidence": 0.0-1.0
-    }}
-}}"""
-
-            try:
-                print("\nDEBUG - Requesting strategy from LLM")
-                response = self.llm.get_completion(prompt, schema=JSONValidator.STRATEGY_SCHEMA)
-                print(f"DEBUG - Raw LLM response: {response[:200]}...")  # Print first 200 chars
-                
-                result = json.loads(response)
-                print(f"DEBUG - Parsed JSON result: {json.dumps(result, indent=2)}")
-                
-                # Extract strategy from response, handling both wrapped and unwrapped formats
-                if 'strategy' in result:
-                    strategy = result['strategy']
-                else:
-                    # If response is not wrapped in 'strategy' key, use it directly
-                    strategy = result
-                    
-                print(f"DEBUG - Extracted strategy: {json.dumps(strategy, indent=2)}")
-                
-                # Validate against schema including ID uniqueness
-                is_valid, validated_strategy, error = JSONValidator.validate_json(
-                    json.dumps(strategy),
-                    JSONValidator.STRATEGY_SCHEMA,
-                    used_ids=self.used_strategy_ids
-                )
-                
-                if not is_valid:
-                    print(f"DEBUG - Validation error: {error}")
-                    raise KeyError(error)
-                
-                strategy = validated_strategy
-                
-                print(f"\nDEBUG - Adding strategy to tracking:")
-                print(f"ID: {strategy_id}")
-                print(f"Strategy name: {strategy['name']}")
-                
-                # Create strategy with generated ID
-                self.strategies[strategy_id] = Strategy(
-                    id=strategy_id,  # Use generated ID
+            context = self._extract_context(example)
+            strategy = await self.generate_strategy(context)
+            if strategy:
+                # Store strategy in self.strategies
+                strategy_obj = Strategy(
+                    id=strategy['id'],
                     name=strategy['name'],
                     description=strategy['description'],
-                    components=strategy['steps'],
-                    context=context,
-                    performance={},
-                    creation_method="generated"
+                    steps=strategy['steps'],
+                    applicability=strategy['applicability'],
+                    confidence=strategy['confidence'],
+                    context=context
                 )
+                self.strategies[strategy['id']] = strategy_obj
                 
-                # Return strategy with generated ID
-                strategy['id'] = strategy_id  # Ensure ID matches
-                return strategy
-
-            except (json.JSONDecodeError, KeyError) as e:
-                print(f"\nDEBUG - Error parsing LLM response: {str(e)}")
-                print("DEBUG - Falling back to default strategy")
-                # Fallback strategy based on context
-                if poor_strategies:
-                    # Create an alternative approach
-                    strategy = {
-                        'id': strategy_id,
-                        'name': "Alternative Strategy",
-                        'description': "A different approach focusing on border manipulation",
-                        'steps': [
-                            {'primitive': 'get_border', 'params': {}},
-                            {'primitive': 'replace_border', 'params': {'old_val': 0, 'new_val': 1}}
-                        ],
-                        'applicability': "Border-focused transformations",
-                        'confidence': 0.7
-                    }
-                else:
-                    # Return a simple initial strategy
-                    strategy = {
-                        'id': strategy_id,
-                        'name': "Basic Strategy",
-                        'description': "A foundational approach using inversion",
-                        'steps': [
-                            {'primitive': 'invert', 'params': {}}
-                        ],
-                        'applicability': "Simple transformations",
-                        'confidence': 0.7
-                    }
-
-                # Track the ID and strategy
-                print(f"\nDEBUG - Adding strategy to tracking:")
-                print(f"ID: {strategy_id}")
-                print(f"Strategy name: {strategy['name']}")
-                
-                self.strategies[strategy_id] = Strategy(
-                    id=strategy_id,
-                    name=strategy['name'],
-                    description=strategy['description'],
-                    components=strategy['steps'],
-                    context=context,
-                    performance={},
-                    creation_method="generated"
-                )
-                return strategy
-
-        except Exception as e:
-            print(f"\nDEBUG - Error in strategy selection: {str(e)}")
-            print("DEBUG - Returning emergency fallback strategy")
-            return {
-                'id': f"fallback_{len(self.strategies)}",
-                'name': "Fallback Strategy",
-                'description': "Emergency fallback strategy",
-                'steps': [{'primitive': 'invert', 'params': {}}],
-                'applicability': "Emergency use only",
-                'confidence': 0.5
-            }
-
-    def compose_new_strategy(self, context: Context) -> Optional[Strategy]:
-        """Create new strategy by combining existing ones or generating novel approach"""
-        if not self.llm:
-            return None
-            
-        # Get relevant historical data
-        similar_contexts = self._find_similar_contexts(context)
-        successful_patterns = self._get_successful_patterns(similar_contexts)
+                strategies_by_example.append({
+                    'example': example,
+                    'strategy': strategy,
+                    'context': context
+                })
         
-        # Ask LLM to compose new strategy
-        prompt = self._generate_strategy_composition_prompt(
-            context, similar_contexts, successful_patterns
-        )
-        
-        response = self.llm.get_completion(prompt, schema=JSONValidator.STRATEGY_SCHEMA)
-        try:
-            strategy_spec = json.loads(response)
-            
-            # Create new strategy
-            strategy = Strategy(
-                id=f"strategy_{len(self.strategies)}",
-                name=strategy_spec['name'],
-                description=strategy_spec['description'],
-                components=strategy_spec['components'],
-                context=context.__dict__,
-                performance={},
-                creation_method="composed"
-            )
-            
-            self.strategies[strategy.id] = strategy
-            return strategy
-            
-        except (json.JSONDecodeError, KeyError):
-            return None
-            
-    def update_performance(self, strategy_id: str,
-                         context: Dict[str, Any],
-                         success_rate: float,
-                         feedback: Optional[Dict[str, Any]] = None) -> None:
-        """Update strategy performance metrics"""
-        try:
-            if strategy_id in self.strategies:
-                strategy = self.strategies[strategy_id]
-                
-                # Store performance for this context
-                context_key = json.dumps(context, sort_keys=True)
-                strategy.performance[context_key] = success_rate
-                
-                # Store feedback if provided
-                if feedback:
-                    if not hasattr(strategy, 'feedback'):
-                        strategy.feedback = {}
-                    strategy.feedback[context_key] = feedback
-                    
-                # If performance is poor, mark strategy as poor performing
-                if success_rate < self.adaptation_threshold:
-                    if not hasattr(self, 'poor_performing_strategies'):
-                        self.poor_performing_strategies = set()
-                    self.poor_performing_strategies.add(strategy_id)
-                    
-        except ValidationError as e:
-            print(f"Validation error in update_performance: {str(e)}")
-        except Exception as e:
-            print(f"Error in update_performance: {str(e)}")
+        # Analyze what makes strategies successful
+        logger.info("Analyzing strategy patterns...")
+        prompt = f"""Analyze these strategies and identify patterns about strategy creation:
 
-    def _calculate_context_similarity(self, context1: Dict[str, Any], 
-                                    context2: Dict[str, Any]) -> float:
-        """Calculate similarity between two contexts"""
-        # Simple similarity based on shared keys and values
-        shared_keys = set(context1.keys()) & set(context2.keys())
-        if not shared_keys:
-            return 0.0
-            
-        similarities = []
-        for key in shared_keys:
-            if isinstance(context1[key], (int, float)) and \
-               isinstance(context2[key], (int, float)):
-                # Numeric similarity
-                max_val = max(abs(context1[key]), abs(context2[key]))
-                if max_val == 0:
-                    similarities.append(1.0)
-                else:
-                    similarities.append(1.0 - abs(context1[key] - context2[key]) / max_val)
-            elif isinstance(context1[key], str) and isinstance(context2[key], str):
-                # String similarity
-                similarities.append(1.0 if context1[key] == context2[key] else 0.0)
-            elif isinstance(context1[key], (list, tuple)) and \
-                 isinstance(context2[key], (list, tuple)):
-                # List similarity
-                common = set(str(x) for x in context1[key]) & \
-                        set(str(x) for x in context2[key])
-                total = set(str(x) for x in context1[key]) | \
-                       set(str(x) for x in context2[key])
-                similarities.append(len(common) / len(total) if total else 0.0)
-                
-        return sum(similarities) / len(similarities) if similarities else 0.0
-        
-    def _find_similar_contexts(self, context: Context) -> List[Context]:
-        """Find historical contexts similar to given context"""
-        similar = []
-        for hist_context in self.context_history:
-            similarity = self._calculate_context_similarity(
-                hist_context.__dict__, context.__dict__
-            )
-            if similarity > 0.7:  # Similarity threshold
-                similar.append(hist_context)
-        return similar
-        
-    def _get_successful_patterns(self, contexts: List[Context]) -> List[Dict[str, Any]]:
-        """Get patterns that were successful in similar contexts"""
-        successful = []
-        for context in contexts:
-            # Find strategies used in this context
-            for hist in self.performance_history:
-                if hist['context'] == context.__dict__ and hist['success_rate'] > 0.8:
-                    patterns = context.identified_patterns
-                    successful.extend(patterns)
-        return successful
-        
-    def _generate_strategy_composition_prompt(self, 
-                                            context: Context,
-                                            similar_contexts: List[Context],
-                                            successful_patterns: List[Dict[str, Any]]) -> str:
-        """Generate prompt for LLM to compose new strategy"""
-        return f"""Given this task context and historical data, suggest a new problem-solving strategy.
+Strategies:
+{json.dumps(strategies_by_example, indent=2)}
 
-Task Context:
-{json.dumps(context.__dict__, indent=2)}
-
-Similar Successful Contexts:
-{json.dumps([c.__dict__ for c in similar_contexts], indent=2)}
-
-Successful Patterns:
-{json.dumps(successful_patterns, indent=2)}
-
-Return a strategy specification in this JSON format:
+Return patterns in this format:
 {{
-    "name": "strategy name",
-    "description": "detailed description of how the strategy works",
-    "components": ["list of primitive IDs or sub-strategies to use"],
-    "rationale": "explanation of why this strategy should work"
-}}"""
-        
-    def _adapt_strategy(self, strategy: Strategy, context: Dict[str, Any], feedback: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Adapt strategy based on feedback"""
-        # Generate adaptation prompt
-        prompt = f"""Adapt this strategy based on feedback.
-
-Strategy:
-{json.dumps(strategy.__dict__, indent=2)}
-
-Context:
-{json.dumps(context, indent=2)}
-
-Feedback:
-{json.dumps(feedback, indent=2)}
-
-Return adapted strategy in this JSON format:
-{{
-    "id": "adapted_strategy_id",
-    "name": "adapted_strategy_name",
-    "description": "adapted_strategy_description",
-    "steps": [
+    "creation_patterns": [
         {{
-            "primitive": "primitive_name",
-            "params": {{}}
+            "pattern": "description of pattern",
+            "evidence": ["example1", "example2"],
+            "confidence": 0.0-1.0
         }}
     ],
-    "applicability": "when this strategy applies",
+    "common_strategies": [
+        {{
+            "strategy": "strategy description",
+            "applicability": "when to use",
+            "confidence": 0.0-1.0
+        }}
+    ]
+}}"""
+        
+        response = await self.llm.get_completion(prompt)
+        try:
+            patterns = json.loads(response)
+            # Validate the response has the required fields
+            if not isinstance(patterns, dict):
+                logger.error("Strategy patterns response is not a dictionary")
+                return {}
+                
+            if 'creation_patterns' not in patterns:
+                logger.error("Strategy patterns missing creation_patterns")
+                return {}
+                
+            if 'common_strategies' not in patterns:
+                logger.error("Strategy patterns missing common_strategies")
+                return {}
+                
+            # Validate each pattern
+            for pattern in patterns['creation_patterns']:
+                if not all(k in pattern for k in ('pattern', 'evidence', 'confidence')):
+                    logger.error(f"Invalid pattern format: {pattern}")
+                    continue
+                    
+            # Validate each strategy
+            for strategy in patterns['common_strategies']:
+                if not all(k in strategy for k in ('strategy', 'applicability', 'confidence')):
+                    logger.error(f"Invalid strategy format: {strategy}")
+                    continue
+                    
+            self.strategy_patterns.extend(patterns.get('creation_patterns', []))
+            return patterns
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse strategy patterns: {str(e)}")
+            return {}
+        except Exception as e:
+            logger.error(f"Error processing strategy patterns: {str(e)}")
+            return {}
+            
+    async def generate_strategy(self, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Generate a new strategy using learned patterns"""
+        logger.info("Starting generate_strategy...")
+        strategy_id = f"strategy_{len(self.used_strategy_ids)}"
+        
+        # Convert numpy arrays to lists for JSON serialization
+        if isinstance(context.get('input'), np.ndarray):
+            context['input'] = context['input'].tolist()
+        if isinstance(context.get('output'), np.ndarray):
+            context['output'] = context['output'].tolist()
+            
+        # Build prompt using learned patterns
+        patterns_str = ""
+        if self.strategy_patterns:
+            patterns_str = "\nLearned Strategy Patterns:\n" + json.dumps(self.strategy_patterns, indent=2)
+            
+        prompt = f"""Generate a strategy for solving this task:
+
+Context:
+{json.dumps(context, indent=2)}
+{patterns_str}
+
+Return strategy in this format:
+{{
+    "id": "{strategy_id}",
+    "name": "strategy name",
+    "description": "detailed strategy description",
+    "steps": [
+        {{
+            "type": "step type",
+            "description": "step description",
+            "parameters": {{}}
+        }}
+    ],
+    "applicability": "when to use this strategy",
     "confidence": 0.0-1.0
 }}"""
 
         try:
-            response = self.llm.get_completion(prompt, schema=JSONValidator.STRATEGY_SCHEMA)
-            adapted = json.loads(response)
-            if not adapted.get('id'):
-                adapted['id'] = f"{strategy.id}_adapted_{len(self.strategies)}"
-            return adapted
-        except Exception as e:
-            print(f"Error adapting strategy: {str(e)}")
+            response = await self.llm.get_completion(prompt)
+            strategy = json.loads(response)
+            
+            # Validate strategy format
+            required_fields = ['id', 'name', 'description', 'steps', 'applicability', 'confidence']
+            if not isinstance(strategy, dict):
+                logger.error("Strategy response is not a dictionary")
+                return None
+                
+            if not all(field in strategy for field in required_fields):
+                logger.error(f"Strategy missing required fields. Has: {list(strategy.keys())}")
+                return None
+                
+            # Validate steps
+            for step in strategy['steps']:
+                if not isinstance(step, dict) or not all(k in step for k in ('type', 'description')):
+                    logger.error(f"Invalid step format: {step}")
+                    return None
+                    
+            # Validate confidence is float between 0 and 1
+            if not isinstance(strategy['confidence'], (int, float)) or not 0 <= strategy['confidence'] <= 1:
+                logger.error(f"Invalid confidence value: {strategy['confidence']}")
+                return None
+                
+            # Store strategy in self.strategies
+            strategy_obj = Strategy(
+                id=strategy['id'],
+                name=strategy['name'],
+                description=strategy['description'],
+                steps=strategy['steps'],
+                applicability=strategy['applicability'],
+                confidence=strategy['confidence'],
+                context=context
+            )
+            self.strategies[strategy['id']] = strategy_obj
+            
+            self.used_strategy_ids.add(strategy_id)
+            return strategy
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse strategy: {str(e)}")
             return None
+        except Exception as e:
+            logger.error(f"Error generating strategy: {str(e)}")
+            return None
+        
+    async def select_strategy(self, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Select best strategy for given context"""
+        logger.info("Starting select_strategy...")
+        
+        # Get all strategies sorted by performance
+        sorted_strategies = sorted(
+            self.strategies.values(),
+            key=lambda s: sum(s.performance) / len(s.performance) if s.performance else 0,
+            reverse=True
+        )
+        
+        if not sorted_strategies:
+            logger.warning("No strategies available")
+            return None
+            
+        # For now just return the best performing strategy
+        best_strategy = sorted_strategies[0]
+        return {
+            'id': best_strategy.id,
+            'name': best_strategy.name,
+            'description': best_strategy.description,
+            'steps': best_strategy.steps,
+            'confidence': best_strategy.confidence
+        }
+        
+    async def update_performance(self, strategy_id: str, accuracy: float, context: Dict[str, Any]) -> None:
+        """Update performance metrics for a strategy"""
+        if strategy_id not in self.strategies:
+            logger.warning(f"Strategy {strategy_id} not found")
+            return
+            
+        # Add performance to history
+        if strategy_id not in self.performance_history:
+            self.performance_history[strategy_id] = []
+        self.performance_history[strategy_id].append(accuracy)
+        
+        # Store context
+        self.context_history.append(context)
+        
+        # Update strategy performance
+        self.strategies[strategy_id].performance.append(accuracy)
+        
+        logger.info(f"Updated performance for strategy {strategy_id}: {accuracy:.2f}")
+        
+    def _validate_strategy(self, strategy: Dict[str, Any]) -> bool:
+        """Validate strategy has required fields"""
+        required_fields = ['strategy_id', 'description', 'steps', 'applicability', 'confidence']
+        return all(field in strategy for field in required_fields)
+        
+    def _extract_context(self, example: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract context from example"""
+        return {
+            'input': example.get('input', []),
+            'output': example.get('output', [])
+        }

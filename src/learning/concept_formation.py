@@ -7,6 +7,9 @@ from src.utils.json_validator import JSONValidator
 from src.utils.validators import SystemValidators, ValidationError
 from src.llm.llm_interface import LLMInterface
 import time
+import logging
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class ConceptValidation:
@@ -19,235 +22,219 @@ class PatternAbstractor:
         self.llm = llm
         self.abstractions = {}
         
-    def abstract_patterns(self, patterns: Dict[str, Any]) -> Dict[str, Any]:
+    async def abstract_patterns(self, patterns: Dict[str, Any]) -> Dict[str, Any]:
         """Abstract higher-level patterns from observed patterns."""
         # Use LLM to find abstractions
-        analysis = self.llm.analyze_pattern({
+        analysis = await self.llm.analyze_pattern({
             'train': [{
                 'input': patterns['input'],
                 'output': patterns['output']
             }],
-            'task': 'abstraction'
+            'analysis_type': 'abstraction'
         })
         
-        # Extract concepts from analysis
+        # Extract concepts and confidence
         concepts = []
-        for section in ['OBJECT PATTERNS:', 'TRANSFORMATION PATTERNS:', 'RELATIONSHIP PATTERNS:', 'ABSTRACT PATTERNS:']:
-            if section in analysis:
-                concepts.extend(analysis[section].split('\n'))
-        
-        # Get confidence from analysis
         confidence = 0.0
-        if 'confidence' in analysis:
-            if analysis['confidence'] == 'high':
-                confidence = 0.9
-            elif analysis['confidence'] == 'medium':
-                confidence = 0.7
-            elif analysis['confidence'] == 'low':
-                confidence = 0.5
-                
+        
+        if analysis and hasattr(analysis, 'text'):
+            try:
+                result = json.loads(analysis.text)
+                concepts = result.get('concepts', [])
+                confidence = result.get('confidence', 0.0)
+            except json.JSONDecodeError:
+                pass
+        
+        # Store abstractions
         abstractions = {
             'concepts': concepts,
             'confidence': confidence,
-            'relationships': self._find_relationships(patterns)
+            'relationships': await self._find_relationships(patterns)
         }
         
         return abstractions
         
-    def _find_relationships(self, patterns: Dict[str, Any]) -> List[Dict[str, Any]]:
+    async def _find_relationships(self, patterns: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Find relationships between patterns."""
         relationships = []
         for i, p1 in enumerate(patterns):
-            for p2 in patterns[i+1:]:
+            for j, p2 in enumerate(patterns[i+1:], i+1):
                 # Use LLM to analyze relationship
-                analysis = self.llm.analyze_pattern({
+                analysis = await self.llm.analyze_pattern({
                     'pattern1': p1,
                     'pattern2': p2,
                     'task': 'relationship'
                 })
                 
-                if analysis.confidence > 0.7:
-                    relationships.append({
-                        'patterns': [p1['id'], p2['id']],
-                        'relationship': analysis.text,
-                        'confidence': analysis.confidence
-                    })
-                    
+                if analysis and hasattr(analysis, 'text'):
+                    try:
+                        result = json.loads(analysis.text)
+                        if result.get('relationship'):
+                            relationships.append(result)
+                    except json.JSONDecodeError:
+                        continue
+                        
         return relationships
 
 class ConceptValidator:
-    def __init__(self, llm: LLMInterface):
+    def __init__(self, llm: LLMInterface, confidence_threshold: float = 0.7):
         self.llm = llm
         self.validations = {}
+        self.confidence_threshold = confidence_threshold
         
-    def validate_concept(self, concept: Dict[str, Any], 
+    async def validate_concept(self, concept: Dict[str, Any], 
                         examples: List[Dict[str, Any]]) -> ConceptValidation:
         """Validate a concept against examples."""
-        # Use LLM to validate concept
-        validation = self.llm.validate_concept(
-            concept['description'],
-            examples
-        )
+        # First try the optimized single-call validation
+        try:
+            prompt = f"""Analyze if this concept is valid across these examples:
+
+Concept:
+{json.dumps(concept, indent=2)}
+
+Examples:
+{json.dumps(examples, indent=2)}
+
+Return response in this exact JSON format:
+{{
+    "generalization_score": 0.0-1.0,  # How well the concept generalizes across examples
+    "consistency_score": 0.0-1.0,     # How consistent the concept is
+    "supports_examples": [true/false], # List indicating if concept supports each example
+    "explanation": "string"           # Explanation of the validation
+}}"""
+
+            response = await self.llm.get_completion(prompt, schema=JSONValidator.CONCEPT_VALIDATION_SCHEMA)
+            result = json.loads(response)
+            
+            # Overall validation
+            is_valid = (
+                result['generalization_score'] > 0.7 and 
+                result['consistency_score'] > 0.7 and
+                all(result['supports_examples'])
+            )
+            
+            validation = ConceptValidation(
+                is_valid=is_valid,
+                feedback=f"Generalization: {result['generalization_score']}, Consistency: {result['consistency_score']}\n{result['explanation']}"
+            )
+            
+            return validation
+            
+        except Exception as e:
+            logger.error(f"Error in optimized concept validation: {str(e)}, falling back to individual validation")
+            # Fall back to individual validation methods if the optimized approach fails
+            generalization_score = await self._test_generalization(concept, examples)
+            consistency_score = await self._test_consistency(concept, examples)
+            
+            is_valid = generalization_score > 0.7 and consistency_score > 0.7
+            
+            return ConceptValidation(
+                is_valid=is_valid,
+                feedback=f"Generalization: {generalization_score}, Consistency: {consistency_score}"
+            )
         
-        result = ConceptValidation(
-            is_valid=validation.confidence > 0.7,
-            feedback=validation.text
-        )
-        
-        self.validations[concept['id']] = result
-        return result
-        
-    def _test_generalization(self, concept: Dict[str, Any], 
+    async def _test_generalization(self, concept: Dict[str, Any], 
                            examples: List[Dict[str, Any]]) -> float:
         """Test how well the concept generalizes."""
-        # Use LLM to assess generalization
-        analysis = self.llm.analyze_pattern({
-            'concept': concept,
-            'examples': examples,
-            'task': 'generalization'
-        })
-        return analysis.confidence
+        score = 0.0
+        for example in examples:
+            if await self._supports_concept(concept, example):
+                score += 1.0
+        return score / len(examples) if examples else 0.0
         
-    def _test_consistency(self, concept: Dict[str, Any], 
+    async def _test_consistency(self, concept: Dict[str, Any], 
                          examples: List[Dict[str, Any]]) -> float:
         """Test consistency of concept across examples."""
-        # Use LLM to assess consistency
-        analysis = self.llm.analyze_pattern({
-            'concept': concept,
-            'examples': examples,
-            'task': 'consistency'
-        })
-        return analysis.confidence
-        
-    def _supports_concept(self, concept: Dict[str, Any], 
+        if not examples:
+            return 0.0
+            
+        # Use LLM to check consistency
+        prompt = f"""Check if this concept is consistent across examples:
+
+Concept:
+{json.dumps(concept, indent=2)}
+
+Examples:
+{json.dumps(examples, indent=2)}
+
+Return a score between 0.0 and 1.0."""
+
+        try:
+            response = await self.llm.get_completion(prompt)
+            return float(response.strip())
+        except (ValueError, AttributeError):
+            return 0.0
+            
+    async def _supports_concept(self, concept: Dict[str, Any], 
                          example: Dict[str, Any]) -> bool:
         """Check if an example supports the concept."""
-        # Use LLM to check support
-        analysis = self.llm.validate_concept(
-            concept['description'],
-            [example]
+        # Use LLM to validate
+        validation = await self.llm.validate_concept(
+            json.dumps(concept),
+            example
         )
-        return analysis.confidence > 0.7
+        return validation.confidence > self.confidence_threshold  # Consider it valid if confidence is high enough
 
 class KnowledgeIntegrator:
     def __init__(self, llm: LLMInterface):
         self.llm = llm
         self.knowledge_base = {}
         
-    def integrate_concept(self, concept: Dict[str, Any], 
+    async def integrate_concept(self, concept: Dict[str, Any], 
                          validation: ConceptValidation) -> Dict[str, Any]:
         """Integrate validated concept into knowledge base."""
         if not validation.is_valid:
             return {'success': False, 'reason': 'Invalid concept'}
             
         # Use LLM to analyze integration
-        analysis = self.llm.analyze_pattern({
-            'concept': concept,
-            'validation': validation,
-            'knowledge_base': self.knowledge_base,
-            'task': 'integration'
-        })
-        
-        if analysis.confidence > 0.7:
+        try:
+            analysis = await self.llm.analyze_pattern({
+                'concept': concept,
+                'validation': validation,
+                'knowledge_base': self.knowledge_base,
+                'task': 'integration'
+            })
+            
+            if not analysis:
+                return {'success': False, 'reason': 'Analysis failed'}
+
+            confidence = getattr(analysis, 'confidence', 0.5)
+            
             integration = {
                 'concept': concept,
                 'validation': validation,
-                'relationships': self._find_knowledge_relationships(concept),
-                'confidence': analysis.confidence
+                'relationships': await self._find_knowledge_relationships(concept),
+                'confidence': confidence
             }
             
             self.knowledge_base[concept['id']] = integration
             return {'success': True, 'integration': integration}
         
-        return {'success': False, 'reason': 'Integration analysis failed'}
+        except Exception as e:
+            logger.error(f"Error integrating concept: {str(e)}")
+            return {'success': False, 'reason': 'Integration failed'}
         
-    def _find_knowledge_relationships(self, 
+    async def _find_knowledge_relationships(self, 
                                     concept: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Find relationships with existing knowledge."""
         relationships = []
-        for existing_id, existing in self.knowledge_base.items():
+        for existing in self.knowledge_base.values():
             # Use LLM to analyze relationship
-            analysis = self.llm.analyze_pattern({
+            analysis = await self.llm.analyze_pattern({
                 'concept1': concept,
                 'concept2': existing['concept'],
                 'task': 'relationship'
             })
             
-            if analysis.confidence > 0.7:
-                relationships.append({
-                    'concepts': [concept['id'], existing_id],
-                    'relationship': analysis.text,
-                    'confidence': analysis.confidence
-                })
-                
+            if analysis and hasattr(analysis, 'text'):
+                try:
+                    result = json.loads(analysis.text)
+                    if result.get('relationship'):
+                        relationships.append(result)
+                except json.JSONDecodeError:
+                    continue
+                    
         return relationships
-
-class ConceptApplicator:
-    def __init__(self, llm: LLMInterface):
-        self.llm = llm
-        self.applications = {}
-        
-    def apply_concept(self, concept: Dict[str, Any], 
-                     task: Dict[str, Any]) -> Dict[str, Any]:
-        """Apply a concept to solve a task."""
-        # Use LLM to analyze applicability
-        analysis = self.llm.analyze_pattern({
-            'concept': concept,
-            'task': task,
-            'analysis_type': 'applicability'
-        })
-        
-        if analysis.confidence > 0.7:
-            application = {
-                'steps': self._generate_application_steps(concept, task),
-                'confidence': analysis.confidence,
-                'adaptations': self._generate_adaptations(concept, task)
-            }
-            
-            self.applications[task['id']] = application
-            return {'success': True, 'application': application}
-            
-        return {'success': False, 'reason': 'Concept not applicable'}
-        
-    def _generate_application_steps(self, concept: Dict[str, Any], 
-                                  task: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Generate steps to apply the concept."""
-        # Use LLM to generate steps
-        analysis = self.llm.analyze_pattern({
-            'concept': concept,
-            'task': task,
-            'analysis_type': 'steps'
-        })
-        
-        return [
-            {'step': step, 'confidence': analysis.confidence}
-            for step in analysis.text.split('\n')
-        ]
-        
-    def _generate_adaptations(self, concept: Dict[str, Any], 
-                            task: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Generate necessary adaptations of the concept."""
-        # Use LLM to generate adaptations
-        analysis = self.llm.analyze_pattern({
-            'concept': concept,
-            'task': task,
-            'analysis_type': 'adaptations'
-        })
-        
-        return [
-            {'adaptation': adapt, 'confidence': analysis.confidence}
-            for adapt in analysis.text.split('\n')
-        ]
-
-class ConceptEvolution:
-    def __init__(self, concept_id: str, versions: List[Dict[str, Any]], 
-                 performance_history: List[float], feedback_history: List[Dict[str, Any]], 
-                 adaptation_history: List[Dict[str, Any]]):
-        self.concept_id = concept_id
-        self.versions = versions
-        self.performance_history = performance_history
-        self.feedback_history = feedback_history
-        self.adaptation_history = adaptation_history
 
 class ConceptFormationEngine:
     """System for learning high-level concepts from examples"""
@@ -258,20 +245,19 @@ class ConceptFormationEngine:
         self.pattern_abstractor = PatternAbstractor(llm)
         self.concept_validator = ConceptValidator(llm)
         self.knowledge_integrator = KnowledgeIntegrator(llm)
-        self.concept_applicator = ConceptApplicator(llm)
         self.evolution_tracker = {}  # concept_id -> ConceptEvolution
         self.feedback_threshold = 0.7  # When to ask for feedback
         self.learning_history = []  # Track learning events
         
-    def learn_from_example(self, task_data: Dict[str, Any],
+    async def learn_from_example(self, task_data: Dict[str, Any],
                           solution: Optional[Dict[str, Any]] = None,
-                          feedback: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                          feedback: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """Learn concepts from example"""
         learned_items = []
         
         # Extract patterns from task
-        patterns = self._extract_patterns(task_data['input'])
-        output_patterns = self._extract_patterns(task_data['output'])
+        patterns = await self._extract_patterns(task_data['input'])
+        output_patterns = await self._extract_patterns(task_data['output'])
         
         # If we have feedback about borders, ensure we focus on them
         border_focus = ""
@@ -321,13 +307,13 @@ Return concepts in JSON format:
         while current_retry < max_retries:
             try:
                 # Get LLM response with schema validation
-                response = self.llm.get_completion(prompt, schema=JSONValidator.CONCEPT_SCHEMA)
+                response = await self.llm.get_completion(prompt, schema=JSONValidator.CONCEPT_SCHEMA)
                 is_valid, result, error = JSONValidator.validate_json(response, JSONValidator.CONCEPT_SCHEMA)
                 
                 if not is_valid:
                     # Generate fix prompt and retry
                     fix_prompt = JSONValidator.generate_fix_prompt(prompt, error, JSONValidator.CONCEPT_SCHEMA)
-                    response = self.llm.get_completion(fix_prompt, schema=JSONValidator.CONCEPT_SCHEMA)
+                    response = await self.llm.get_completion(fix_prompt, schema=JSONValidator.CONCEPT_SCHEMA)
                     is_valid, result, error = JSONValidator.validate_json(response, JSONValidator.CONCEPT_SCHEMA)
                     
                     if not is_valid:
@@ -342,10 +328,7 @@ Return concepts in JSON format:
                             concept['description'] = f"Border-related concept: {concept['description']}"
                     
                     # Validate concept
-                    validation = self.concept_validator.validate_concept(
-                        concept,
-                        [{'input': task_data['input'], 'output': task_data['output']}]
-                    )
+                    validation = await self.concept_validator.validate_concept(concept, [{'input': task_data['input'], 'output': task_data['output']}])
                     
                     if validation.is_valid:
                         learned_items.append({
@@ -354,7 +337,7 @@ Return concepts in JSON format:
                         })
                         
                         # Track evolution
-                        self._track_evolution(concept, validation, solution, feedback)
+                        await self._track_evolution(concept, validation, solution, feedback)
                 
                 return {'learned_items': learned_items}
                 
@@ -365,19 +348,140 @@ Return concepts in JSON format:
         print("Failed to learn concepts after all retries")
         return {'learned_items': []}
         
-    def apply_learned_concepts(self, task: Dict[str, Any]) -> Dict[str, Any]:
+    async def learn_from_examples(self, examples: List[Dict[str, Any]],
+                            solution: Optional[Dict[str, Any]] = None,
+                            feedback: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """Learn unified concepts from multiple examples"""
+        learned_items = []
+        
+        # Extract patterns from all examples
+        all_input_patterns = []
+        all_output_patterns = []
+        for example in examples:
+            input_patterns = await self._extract_patterns(example['input'])
+            output_patterns = await self._extract_patterns(example['output'])
+            all_input_patterns.append(input_patterns)
+            all_output_patterns.append(output_patterns)
+        
+        # If we have feedback about borders, ensure we focus on them
+        border_focus = ""
+        if feedback and 'feedback' in feedback:
+            if 'border' in feedback['feedback'].lower():
+                border_focus = """
+Special Instructions:
+- Pay extra attention to border patterns and relationships
+- Look for transformations that affect the border cells
+- Consider relationships between border and non-border cells
+- Focus on how borders change between input and output
+"""
+        
+        # Analyze patterns across all examples to find unified concepts
+        prompt = f"""Analyze these patterns to discover unified concepts that work for ALL examples:
+
+Examples:
+{json.dumps([{
+    'input_patterns': inp,
+    'output_patterns': out
+} for inp, out in zip(all_input_patterns, all_output_patterns)], indent=2)}
+
+Previous Feedback: {json.dumps(feedback, indent=2)}
+{border_focus}
+
+Instructions:
+1. Find patterns that are consistent across ALL examples
+2. Identify transformation rules that work for ALL examples
+3. Note any important variations that the concepts must handle
+4. Focus on generating concepts that can solve ALL examples
+
+Focus on:
+1. Border patterns and relationships
+2. Transformation patterns
+3. Object patterns
+4. Pattern relationships
+
+Return concepts in CONCEPT_SCHEMA format."""
+
+        # Get concepts from LLM
+        response = await self.llm.get_completion(prompt)
+        
+        try:
+            concepts = json.loads(response)
+            if not isinstance(concepts, dict) or 'concepts' not in concepts:
+                raise ValueError("Invalid concept format")
+                
+            # Validate each concept works for all examples
+            for concept in concepts['concepts']:
+                validation = await self.concept_validator.validate_concept(concept, examples)
+                if validation.is_valid:
+                    # Only keep concepts that work for all examples
+                    await self.knowledge_integrator.integrate_concept(concept, validation)
+                    learned_items.append({
+                        'type': 'concept',
+                        'item': concept,
+                        'validation': validation
+                    })
+                    
+                    # Track evolution
+                    await self._track_evolution(concept, validation, solution, feedback)
+                    
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            print(f"Error processing concepts: {str(e)}")
+            
+        return {'learned_items': learned_items}
+
+    async def apply_learned_concepts(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Apply learned concepts to solve a task"""
         # Find relevant concepts
-        relevant_concepts = self._find_relevant_concepts(task)
+        relevant_concepts = await self._find_relevant_concepts(task)
         
         # Generate solution steps
         steps = []
         explanations = []
         for concept in relevant_concepts:
-            application = self.concept_applicator.apply_concept(concept, task)
-            if application:
-                steps.extend(application['steps'])
-                explanations.extend(application['explanations'])
+            # Use LLM to analyze applicability
+            prompt = f"""Analyze if this concept is applicable to the task:
+
+Concept:
+{json.dumps(concept, indent=2)}
+
+Task:
+{json.dumps(task, indent=2)}
+
+Return a score between 0.0 and 1.0 indicating applicability."""
+            
+            try:
+                response = await self.llm.get_completion(prompt)
+                applicability_score = float(response.strip())
+                
+                if applicability_score > 0.7:
+                    # Generate steps to apply the concept
+                    prompt = f"""Generate steps to apply this concept to the task:
+
+Concept:
+{json.dumps(concept, indent=2)}
+
+Task:
+{json.dumps(task, indent=2)}
+
+Return steps in JSON format:
+{{
+    "steps": [
+        {{
+            "step": "step description",
+            "confidence": 0.0-1.0
+        }}
+    ]
+}}"""
+                    
+                    response = await self.llm.get_completion(prompt)
+                    try:
+                        result = json.loads(response)
+                        steps.extend(result['steps'])
+                        explanations.extend([f"Applying concept {concept['name']}"] * len(result['steps']))
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+            except (ValueError, AttributeError):
+                pass
                 
         return {
             'steps': steps,
@@ -385,7 +489,7 @@ Return concepts in JSON format:
             'concepts_used': relevant_concepts
         }
         
-    def incorporate_feedback(self, concept_id: str, feedback: Dict[str, Any]) -> None:
+    async def incorporate_feedback(self, concept_id: str, feedback: Dict[str, Any]) -> Dict[str, Any]:
         """Incorporate feedback to improve concepts"""
         # Find the concept to update
         concept_to_update = None
@@ -412,14 +516,14 @@ Return updated concept in JSON format:
         "id": "{concept_id}",
         "name": "concept name",
         "description": "detailed description incorporating feedback",
-        "rules": ["list of rules that define this concept"],
+        "rules": ["list of rules"],
         "applicability": "when this concept applies",
         "examples": ["example applications"]
     }}
 }}"""
 
         try:
-            response = self.llm.get_completion(prompt)
+            response = await self.llm.get_completion(prompt)
             result = json.loads(response)
             updated_concept = result['updated_concept']
             
@@ -458,7 +562,7 @@ Return updated concept in JSON format:
         except Exception as e:
             print(f"Error incorporating feedback: {str(e)}")
         
-    def _track_evolution(self, concept: Dict[str, Any],
+    async def _track_evolution(self, concept: Dict[str, Any],
                         validation: ConceptValidation,
                         solution: Optional[Dict[str, Any]] = None,
                         feedback: Optional[Dict[str, Any]] = None) -> None:
@@ -487,7 +591,7 @@ Return updated concept in JSON format:
         if len(evolution.performance_history) >= 5:
             recent_performance = evolution.performance_history[-5:]
             if np.mean(recent_performance) < 0.7:
-                adaptation = self._generate_adaptation(concept, {
+                adaptation = await self._generate_adaptation(concept, {
                     'trigger': 'poor_performance',
                     'performance': recent_performance
                 })
@@ -499,7 +603,7 @@ Return updated concept in JSON format:
                         'adaptation': adaptation
                     })
                     
-    def _check_feedback_needed(self, concepts: List[Dict[str, Any]],
+    async def _check_feedback_needed(self, concepts: List[Dict[str, Any]],
                              validations: List[ConceptValidation]) -> bool:
         """Check if human feedback is needed"""
         for concept, validation in zip(concepts, validations):
@@ -516,7 +620,7 @@ Return updated concept in JSON format:
                     
         return False
 
-    def _generate_adaptation(self, concept: Dict[str, Any],
+    async def _generate_adaptation(self, concept: Dict[str, Any],
                            trigger: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Generate adaptation for a concept"""
         prompt = f"""This concept needs adaptation:
@@ -540,14 +644,14 @@ Suggest adaptations in JSON format:
     }}
 }}"""
         
-        response = self.llm.get_completion(prompt)
+        response = await self.llm.get_completion(prompt)
         try:
             result = json.loads(response)
             return result['adapted_concept']
         except (json.JSONDecodeError, KeyError):
             return None
 
-    def _apply_feedback(self, concepts: List[Dict[str, Any]], 
+    async def _apply_feedback(self, concepts: List[Dict[str, Any]], 
                        feedback: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Apply feedback to concepts"""
         # Use LLM to apply feedback
@@ -573,14 +677,14 @@ Return updated concepts:
     ]
 }}"""
         
-        response = self.llm.get_completion(prompt)
+        response = await self.llm.get_completion(prompt)
         try:
             return json.loads(response)['updated_concepts']
         except (json.JSONDecodeError, KeyError):
             return concepts
 
-    def _learn_from_solution(self, concepts: List[Dict[str, Any]], 
-                            solution: Dict[str, Any]) -> None:
+    async def _learn_from_solution(self, concepts: List[Dict[str, Any]], 
+                            solution: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Learn from a solution"""
         # Use LLM to analyze solution
         prompt = f"""Analyze this solution and learn from it:
@@ -605,7 +709,7 @@ Return updated concepts:
     ]
 }}"""
         
-        response = self.llm.get_completion(prompt)
+        response = await self.llm.get_completion(prompt)
         try:
             updated_concepts = json.loads(response)['updated_concepts']
             for concept in concepts:
@@ -615,7 +719,7 @@ Return updated concepts:
         except (json.JSONDecodeError, KeyError):
             pass
             
-    def _find_relevant_concepts(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
+    async def _find_relevant_concepts(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Find concepts relevant to a task"""
         prompt = f"""Given this task, which concepts are most relevant?
 
@@ -636,7 +740,7 @@ Return relevant concept IDs and why they apply:
     ]
 }}"""
         
-        response = self.llm.get_completion(prompt)
+        response = await self.llm.get_completion(prompt)
         try:
             result = json.loads(response)
             concepts = []
@@ -649,7 +753,7 @@ Return relevant concept IDs and why they apply:
         except (json.JSONDecodeError, KeyError):
             return []
             
-    def _extract_patterns(self, grid: List[List[int]]) -> Dict[str, Any]:
+    async def _extract_patterns(self, grid: List[List[int]]) -> Dict[str, Any]:
         """Extract patterns from a grid"""
         try:
             patterns = {
@@ -665,7 +769,7 @@ Return relevant concept IDs and why they apply:
                 patterns['row_patterns'].append({
                     'values': row,
                     'sum': sum(row),
-                    'runs': self._get_runs(row)
+                    'runs': await self._get_runs(row)
                 })
 
             # Column patterns
@@ -674,7 +778,7 @@ Return relevant concept IDs and why they apply:
                 patterns['col_patterns'].append({
                     'values': col,
                     'sum': sum(col),
-                    'runs': self._get_runs(col)
+                    'runs': await self._get_runs(col)
                 })
 
             # Region patterns (2x2)
@@ -714,7 +818,7 @@ Return relevant concept IDs and why they apply:
                 'region_patterns': []
             }
 
-    def _get_runs(self, values: List[int]) -> List[Dict[str, Any]]:
+    async def _get_runs(self, values: List[int]) -> List[Dict[str, Any]]:
         """Get runs of same values"""
         if not values:
             return []
@@ -740,3 +844,13 @@ Return relevant concept IDs and why they apply:
         })
 
         return runs
+
+class ConceptEvolution:
+    def __init__(self, concept_id: str, versions: List[Dict[str, Any]], 
+                 performance_history: List[float], feedback_history: List[Dict[str, Any]], 
+                 adaptation_history: List[Dict[str, Any]]):
+        self.concept_id = concept_id
+        self.versions = versions
+        self.performance_history = performance_history
+        self.feedback_history = feedback_history
+        self.adaptation_history = adaptation_history
