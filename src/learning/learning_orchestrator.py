@@ -1,7 +1,7 @@
 from typing import Dict, List, Any, Optional
 import json
 import time
-from src.learning.concept_formation import ConceptLearningSystem
+from src.learning.concept_formation import ConceptFormationEngine
 from src.learning.primitive_learning import DynamicPrimitiveLearner
 from src.strategy.meta_strategy import MetaStrategyEngine
 from src.utils.json_validator import JSONValidator
@@ -12,7 +12,7 @@ class LearningOrchestrator:
     
     def __init__(self, llm: LLMInterface):
         self.llm = llm
-        self.concept_learner = ConceptLearningSystem(llm)
+        self.concept_learner = ConceptFormationEngine(llm)
         self.primitive_learner = DynamicPrimitiveLearner(llm)
         self.strategy_engine = MetaStrategyEngine(llm)
         self.learning_history = []

@@ -315,10 +315,15 @@ class LLMInterface:
     def get_completion(self, prompt: str, schema: Optional[Dict[str, Any]] = None, max_retries: int = 2) -> str:
         """Get completion from LLM with JSON validation"""
         try:
+            print("\nDEBUG - LLM get_completion:")
+            print(f"Prompt: {prompt[:200]}...")  # Print first 200 chars of prompt
+            print(f"Schema type: {schema['title'] if schema and 'title' in schema else 'No schema'}")
+            
             # For testing, return mock responses based on the requested schema
             mock_response = None
             
             if schema == JSONValidator.PRIMITIVE_SCHEMA:
+                print("DEBUG - Using PRIMITIVE_SCHEMA mock response")
                 mock_response = {
                     "primitive": {
                         "id": "test_primitive",
@@ -331,17 +336,21 @@ class LLMInterface:
                     }
                 }
             elif schema == JSONValidator.STRATEGY_SCHEMA:
+                print("DEBUG - Using STRATEGY_SCHEMA mock response")
                 mock_response = {
-                    "id": "test_strategy",
-                    "name": "Test Strategy",
-                    "description": "A test strategy for unit testing",
-                    "steps": [
-                        {"primitive": "test_primitive", "params": {}}
-                    ],
-                    "applicability": "Testing only",
-                    "confidence": 0.8
+                    "strategy": {  
+                        "id": "test_strategy",
+                        "name": "Test Strategy",
+                        "description": "A test strategy for unit testing",
+                        "steps": [
+                            {"primitive": "test_primitive", "params": {}}
+                        ],
+                        "applicability": "Testing only",
+                        "confidence": 0.8
+                    }
                 }
             elif schema == JSONValidator.CONCEPT_SCHEMA:
+                print("DEBUG - Using CONCEPT_SCHEMA mock response")
                 mock_response = {
                     "concepts": [{
                         "id": "test_concept",
@@ -354,12 +363,14 @@ class LLMInterface:
                     }]
                 }
             else:
+                print("DEBUG - Using default mock response")
                 mock_response = {
                     "response": "Mock response for testing"
                 }
 
             # Convert to string
             response_str = json.dumps(mock_response)
+            print(f"DEBUG - Generated response: {response_str[:200]}...")  
 
             # If no schema provided, just return the response
             if not schema:
@@ -367,6 +378,7 @@ class LLMInterface:
 
             # Validate response
             is_valid, parsed_json, error = JSONValidator.validate_json(response_str, schema)
+            print(f"DEBUG - Validation result: valid={is_valid}, error={error if not is_valid else 'None'}")
             
             # If valid, return it
             if is_valid:
@@ -375,6 +387,7 @@ class LLMInterface:
             # If invalid and we have retries left, try to fix it
             retries = max_retries
             while not is_valid and retries > 0:
+                print(f"DEBUG - Attempting fix, {retries} retries remaining")
                 # Generate fix prompt
                 fix_prompt = JSONValidator.generate_fix_prompt(prompt, error, schema)
                 
@@ -389,17 +402,20 @@ class LLMInterface:
                 )
                 
                 response_str = response.choices[0].message.content if response.choices else ""
+                print(f"DEBUG - Fix attempt response: {response_str[:200]}...")
                 
                 # Validate new response
                 is_valid, parsed_json, error = JSONValidator.validate_json(response_str, schema)
+                print(f"DEBUG - Fix validation result: valid={is_valid}, error={error if not is_valid else 'None'}")
                 if is_valid:
                     return response_str
                     
                 retries -= 1
 
             # If we exhausted retries, return original response
+            print("DEBUG - Exhausted retries, returning original response")
             return response_str
             
         except Exception as e:
-            print(f"Error getting completion: {str(e)}")
+            print(f"DEBUG - Error getting completion: {str(e)}")
             return "{}"

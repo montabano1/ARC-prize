@@ -41,19 +41,27 @@ class MetaStrategyEngine:
     def select_strategy(self, context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Select best strategy for context"""
         try:
-            # Generate unique ID
-            base_id = f"strategy_{len(self.strategies)}"
-            strategy_id = base_id
-            counter = 1
-            while not SystemValidators.validate_strategy_id_unique(strategy_id, self.used_strategy_ids):
-                strategy_id = f"{base_id}_{counter}"
-                counter += 1
+            print("\nDEBUG - MetaStrategyEngine select_strategy:")
+            print(f"Context: {json.dumps(context, indent=2)}")
+            
+            # Generate unique strategy ID
+            strategy_id = f"strategy_{len(self.used_strategy_ids)}"
+            while strategy_id in self.used_strategy_ids:
+                strategy_id = f"strategy_{len(self.used_strategy_ids) + 1}"
+            
+            # Track this ID
+            self.used_strategy_ids.add(strategy_id)
+                
+            print(f"DEBUG - Generated strategy_id: {strategy_id}")
 
             # Check if we have poor performing strategies to learn from
-            poor_strategies = [
-                s for s in self.strategies.values()
-                if any(p < self.adaptation_threshold for p in s.performance.values())
-            ]
+            if hasattr(self, 'poor_performing_strategies'):
+                poor_strategies = [
+                    self.strategies[s_id] for s_id in self.poor_performing_strategies
+                ]
+            else:
+                poor_strategies = []
+            print(f"DEBUG - Found {len(poor_strategies)} poor performing strategies")
 
             # Generate strategy based on context and past performance
             prompt = f"""Generate a strategy for this context:
@@ -99,11 +107,57 @@ Return strategy in JSON format:
 }}"""
 
             try:
-                response = self.llm.get_completion(prompt)
+                print("\nDEBUG - Requesting strategy from LLM")
+                response = self.llm.get_completion(prompt, schema=JSONValidator.STRATEGY_SCHEMA)
+                print(f"DEBUG - Raw LLM response: {response[:200]}...")  # Print first 200 chars
+                
                 result = json.loads(response)
-                strategy = result['strategy']
+                print(f"DEBUG - Parsed JSON result: {json.dumps(result, indent=2)}")
+                
+                # Extract strategy from response, handling both wrapped and unwrapped formats
+                if 'strategy' in result:
+                    strategy = result['strategy']
+                else:
+                    # If response is not wrapped in 'strategy' key, use it directly
+                    strategy = result
+                    
+                print(f"DEBUG - Extracted strategy: {json.dumps(strategy, indent=2)}")
+                
+                # Validate against schema including ID uniqueness
+                is_valid, validated_strategy, error = JSONValidator.validate_json(
+                    json.dumps(strategy),
+                    JSONValidator.STRATEGY_SCHEMA,
+                    used_ids=self.used_strategy_ids
+                )
+                
+                if not is_valid:
+                    print(f"DEBUG - Validation error: {error}")
+                    raise KeyError(error)
+                
+                strategy = validated_strategy
+                
+                print(f"\nDEBUG - Adding strategy to tracking:")
+                print(f"ID: {strategy_id}")
+                print(f"Strategy name: {strategy['name']}")
+                
+                # Create strategy with generated ID
+                self.strategies[strategy_id] = Strategy(
+                    id=strategy_id,  # Use generated ID
+                    name=strategy['name'],
+                    description=strategy['description'],
+                    components=strategy['steps'],
+                    context=context,
+                    performance={},
+                    creation_method="generated"
+                )
+                
+                # Return strategy with generated ID
+                strategy['id'] = strategy_id  # Ensure ID matches
+                return strategy
+
             except (json.JSONDecodeError, KeyError) as e:
-                print(f"Error parsing LLM response: {str(e)}")
+                print(f"\nDEBUG - Error parsing LLM response: {str(e)}")
+                print("DEBUG - Falling back to default strategy")
                 # Fallback strategy based on context
                 if poor_strategies:
                     # Create an alternative approach
@@ -131,21 +185,25 @@ Return strategy in JSON format:
                         'confidence': 0.7
                     }
 
-            # Track the ID and strategy
-            self.used_strategy_ids.add(strategy_id)
-            self.strategies[strategy_id] = Strategy(
-                id=strategy_id,
-                name=strategy['name'],
-                description=strategy['description'],
-                components=strategy['steps'],
-                context=context,
-                performance={},
-                creation_method="generated"
-            )
-            return strategy
+                # Track the ID and strategy
+                print(f"\nDEBUG - Adding strategy to tracking:")
+                print(f"ID: {strategy_id}")
+                print(f"Strategy name: {strategy['name']}")
+                
+                self.strategies[strategy_id] = Strategy(
+                    id=strategy_id,
+                    name=strategy['name'],
+                    description=strategy['description'],
+                    components=strategy['steps'],
+                    context=context,
+                    performance={},
+                    creation_method="generated"
+                )
+                return strategy
 
         except Exception as e:
-            print(f"Error in strategy selection: {str(e)}")
+            print(f"\nDEBUG - Error in strategy selection: {str(e)}")
+            print("DEBUG - Returning emergency fallback strategy")
             return {
                 'id': f"fallback_{len(self.strategies)}",
                 'name': "Fallback Strategy",
@@ -198,38 +256,23 @@ Return strategy in JSON format:
         try:
             if strategy_id in self.strategies:
                 strategy = self.strategies[strategy_id]
+                
+                # Store performance for this context
                 context_key = json.dumps(context, sort_keys=True)
                 strategy.performance[context_key] = success_rate
-
-                # Check if adaptation needed
-                if len(strategy.performance) >= 5:
-                    recent_performance = list(strategy.performance.values())[-5:]
-                    if np.mean(recent_performance) < self.adaptation_threshold:
-                        # Generate unique ID for adapted strategy
-                        base_id = f"{strategy_id}_adapted"
-                        adapted_id = base_id
-                        counter = 1
-                        while not SystemValidators.validate_strategy_id_unique(adapted_id, self.used_strategy_ids):
-                            adapted_id = f"{base_id}_{counter}"
-                            counter += 1
-
-                        # Create more complex strategy
-                        adapted = Strategy(
-                            id=adapted_id,
-                            name=f"Adapted {strategy.name}",
-                            description="A more complex test strategy",
-                            components=[
-                                {'primitive': 'test_primitive', 'params': {}},
-                                {'primitive': 'test_primitive_2', 'params': {}},
-                                {'primitive': 'test_primitive_3', 'params': {}}
-                            ],
-                            context=strategy.context,
-                            performance={},
-                            creation_method="adapted"
-                        )
-
-                        self.used_strategy_ids.add(adapted_id)
-                        self.strategies[adapted_id] = adapted
+                
+                # Store feedback if provided
+                if feedback:
+                    if not hasattr(strategy, 'feedback'):
+                        strategy.feedback = {}
+                    strategy.feedback[context_key] = feedback
+                    
+                # If performance is poor, mark strategy as poor performing
+                if success_rate < self.adaptation_threshold:
+                    if not hasattr(self, 'poor_performing_strategies'):
+                        self.poor_performing_strategies = set()
+                    self.poor_performing_strategies.add(strategy_id)
+                    
         except ValidationError as e:
             print(f"Validation error in update_performance: {str(e)}")
         except Exception as e:

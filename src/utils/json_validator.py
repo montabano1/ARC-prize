@@ -6,10 +6,14 @@ from jsonschema import validate, ValidationError
 class JSONValidator:
     """Validates and helps fix JSON responses from LLM"""
 
-    @staticmethod
-    def validate_json(json_str: str, schema: Dict[str, Any]) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+    @staticmethod 
+    def validate_json(json_str: str, schema: Dict[str, Any], used_ids: Optional[set] = None) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
         """
         Validate JSON string against a schema
+        Args:
+            json_str: JSON string to validate
+            schema: Schema to validate against
+            used_ids: Optional set of already used IDs to check uniqueness
         Returns: (is_valid, parsed_json, error_message)
         """
         try:
@@ -18,6 +22,12 @@ class JSONValidator:
             
             # Then validate against schema
             validate(instance=parsed, schema=schema)
+            
+            # Check ID uniqueness if needed
+            if used_ids is not None and 'id' in parsed:
+                if parsed['id'] in used_ids:
+                    return False, None, f"ID '{parsed['id']}' is already in use"
+                
             return True, parsed, None
             
         except json.JSONDecodeError as e:
@@ -101,7 +111,10 @@ Please provide a valid JSON response that matches the schema exactly."""
         "type": "object",
         "required": ["id", "name", "description", "steps", "applicability", "confidence"],
         "properties": {
-            "id": {"type": "string"},
+            "id": {
+                "type": "string",
+                "pattern": "^strategy_[0-9]+$"  # Enforce format strategy_N
+            },
             "name": {"type": "string"},
             "description": {"type": "string"},
             "steps": {

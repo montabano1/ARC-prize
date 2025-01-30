@@ -249,7 +249,7 @@ class ConceptEvolution:
         self.feedback_history = feedback_history
         self.adaptation_history = adaptation_history
 
-class ConceptLearningSystem:
+class ConceptFormationEngine:
     """System for learning high-level concepts from examples"""
     
     def __init__(self, llm: LLMInterface):

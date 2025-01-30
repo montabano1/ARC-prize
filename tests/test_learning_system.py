@@ -7,10 +7,19 @@ from src.llm.llm_interface import LLMInterface
 from src.dsl.primitives import DynamicPrimitiveLibrary, DSLPrimitive
 import os
 from dotenv import load_dotenv
+from src.strategy.meta_strategy import MetaStrategyEngine
+from src.learning.concept_formation import ConceptFormationEngine
+from src.utils.json_validator import JSONValidator
 
 class TestLearningSystem(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
+    """Test cases for the learning system"""
+
+    def setUp(self):
+        """Set up test fixtures"""
+        self.llm = MockLLMInterface()
+        self.meta_strategy = MetaStrategyEngine(self.llm)
+        self.concept_formation = ConceptFormationEngine(self.llm)
+        
         # Load environment variables
         load_dotenv()
         
@@ -19,13 +28,13 @@ class TestLearningSystem(unittest.TestCase):
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable not set. Copy .env.example to .env and add your API key.")
             
-        cls.llm = LLMInterface(api_key)
-        cls.orchestrator = LearningOrchestrator(cls.llm)
+        self.llm = LLMInterface(api_key)
+        self.orchestrator = LearningOrchestrator(self.llm)
         
         # Load example task
         task_path = Path(__file__).parent.parent / 'data' / 'example_task.json'
         with open(task_path) as f:
-            cls.example_task = json.load(f)
+            self.example_task = json.load(f)
             
     def test_concept_learning(self):
         """Test that system can learn concepts from examples"""
@@ -231,5 +240,148 @@ class TestLearningSystem(unittest.TestCase):
             "Strategy should have a meaningful description explaining its approach"
         )
         
+    def test_invalid_input_handling(self):
+        """Test system's response to invalid inputs"""
+        # TODO: Implement tests for:
+        # - Empty input
+        # - Malformed JSON
+        # - Invalid grid dimensions
+        # - Missing required fields
+        pass
+
+    def test_memory_management(self):
+        """Test system's memory usage and cleanup"""
+        # TODO: Implement tests for:
+        # - Memory usage during learning
+        # - Cleanup after task completion
+        # - Handling of large datasets
+        # - Resource allocation and deallocation
+        pass
+
+    def test_end_to_end_workflow(self):
+        """Test complete workflow from learning to application"""
+        # TODO: Implement tests for:
+        # - Full pipeline execution
+        # - Component interaction
+        # - State management
+        # - Cross-component data flow
+        pass
+
+    def test_concept_generalization(self):
+        """Test how well learned concepts generalize"""
+        # TODO: Implement tests for:
+        # - Performance on unseen examples
+        # - Overfitting detection
+        # - Concept stability
+        # - Pattern recognition accuracy
+        pass
+
+    def test_state_persistence(self):
+        """Test saving and loading system state"""
+        # TODO: Implement tests for:
+        # - Concept persistence
+        # - Strategy persistence
+        # - Recovery from interruption
+        # - State versioning
+        pass
+
+    def test_system_resilience(self):
+        """Test system's ability to handle adverse conditions"""
+        # TODO: Implement tests for:
+        # - Conflicting patterns
+        # - Noisy data
+        # - Resource constraints
+        # - Error recovery
+        pass
+
+    def test_performance_benchmarks(self):
+        """Test system performance metrics"""
+        # TODO: Implement tests for:
+        # - Processing time benchmarks
+        # - Memory usage benchmarks
+        # - Scaling with input size
+        # - Resource utilization
+        pass
+
+    def test_concurrent_operations(self):
+        """Test system behavior under concurrent operations"""
+        # TODO: Implement tests for:
+        # - Parallel task processing
+        # - Resource sharing
+        # - State consistency
+        # - Race condition handling
+        pass
+
+    def test_regression_suite(self):
+        """Test suite for known issues and edge cases"""
+        # TODO: Implement tests for:
+        # - Previously identified bugs
+        # - Edge cases
+        # - Corner cases
+        # - Boundary conditions
+        pass
+
+class MockLLMInterface:
+    """Mock LLM interface for testing"""
+    def __init__(self):
+        self.response_count = 0
+        self.poor_performing_strategies = set()
+        
+    def get_completion(self, prompt: str, schema=None) -> str:
+        """Return mock responses for testing"""
+        self.response_count += 1
+        
+        if schema == JSONValidator.STRATEGY_SCHEMA:
+            # Check if we're generating a strategy after poor performance
+            if "Poor Strategies:" in prompt and "[]" not in prompt:
+                # Return an improved strategy with different steps
+                return json.dumps({
+                    "strategy": {
+                        "id": f"strategy_{self.response_count}",
+                        "name": "Improved Test Strategy",
+                        "description": "An improved strategy that addresses previous failures",
+                        "steps": [{"primitive": "improved_primitive", "params": {"threshold": 0.8}}],
+                        "applicability": "Testing with improvements",
+                        "confidence": 0.9
+                    }
+                })
+            else:
+                # Return initial strategy
+                return json.dumps({
+                    "strategy": {
+                        "id": f"strategy_{self.response_count}",
+                        "name": "Test Strategy",
+                        "description": "A test strategy for unit testing",
+                        "steps": [{"primitive": "test_primitive", "params": {}}],
+                        "applicability": "Testing only",
+                        "confidence": 0.8
+                    }
+                })
+        elif schema == JSONValidator.CONCEPT_SCHEMA:
+            return json.dumps({
+                "concepts": [{
+                    "id": "test_concept",
+                    "name": "Border Pattern Concept",
+                    "description": "A concept focused on border patterns and transformations",
+                    "rules": ["Analyze border cells", "Track border changes"],
+                    "confidence": 0.8
+                }]
+            })
+        elif schema == JSONValidator.PRIMITIVE_SCHEMA:
+            return json.dumps({
+                "primitive": {
+                    "id": "test_primitive",
+                    "name": "Test Primitive",
+                    "description": "A test primitive for border pattern analysis",
+                    "parameters": {"param1": "int"},
+                    "implementation_guide": "Mock implementation",
+                    "applicability": "Testing only",
+                    "examples": ["test example"]
+                }
+            })
+        else:
+            # Default mock response
+            return json.dumps({"response": "Mock response for testing"})
+
 if __name__ == '__main__':
     unittest.main()
