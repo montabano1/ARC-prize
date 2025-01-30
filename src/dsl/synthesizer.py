@@ -15,9 +15,11 @@ class DSLProgram:
     
 class DSLSynthesizer:
     """Synthesizes DSL programs based on patterns and concepts"""
-    def __init__(self, primitive_library: DynamicPrimitiveLibrary):
+    def __init__(self, primitive_library: DynamicPrimitiveLibrary, llm):
         self.library = primitive_library
+        self.llm = llm
         self.program_cache: Dict[str, DSLProgram] = {}
+        self.intermediate_results: Dict[str, Any] = {}
         
     def synthesize_program(self, task_features: TaskFeatures) -> Optional[DSLProgram]:
         """Synthesize a DSL program based on identified patterns"""
@@ -27,46 +29,129 @@ class DSLSynthesizer:
         cache_key = self._get_cache_key(patterns)
         if cache_key in self.program_cache:
             return self.program_cache[cache_key]
-            
-        # Get concepts from task features
-        concepts = task_features.extracted_concepts
-        if not concepts:
+        
+        print("\nDEBUG - Available primitives:")
+        for name, prim in self.library.primitives.items():
+            print(f"- {name}: {prim.description}")
+        
+        # Generate program from LLM analysis
+        program = self._synthesize_from_llm(patterns, task_features)
+        if program:
+            self.program_cache[cache_key] = program
+            print("\nDEBUG - Successfully generated program:")
+            print(f"Steps: {program.steps}")
+            print(f"Description: {program.description}")
+            return program
+        else:
+            print("\nDEBUG - Failed to generate program. Check LLM response and primitive matching.")
+        
+        return None
+
+    def _synthesize_from_llm(self, patterns: Dict[str, List[Dict[str, Any]]], task_features: TaskFeatures) -> Optional[DSLProgram]:
+        """Use LLM to synthesize program from patterns"""
+        # Extract key information from patterns
+        pattern_info = {
+            'object': patterns.get('object', []),
+            'transformation': patterns.get('transformation', []),
+            'relationship': patterns.get('relationship', []),
+            'abstract': patterns.get('abstract', [])
+        }
+        
+        # Get available primitives
+        available_primitives = {
+            name: prim.description 
+            for name, prim in self.library.primitives.items()
+        }
+        
+        print("\nDEBUG - Requesting program steps with patterns:")
+        for k, v in pattern_info.items():
+            print(f"{k}: {v}")
+        
+        # Ask LLM to suggest program steps
+        response = self.llm.suggest_program_steps(pattern_info, available_primitives)
+        if not response:
+            print("\nDEBUG - No program steps suggested by LLM")
             return None
             
-        # First try using unified strategy concept
-        strategy_concept = next((c for c in concepts if c.name.startswith('strategy_')), None)
-        if strategy_concept and strategy_concept.dsl_template:
-            steps = self._instantiate_template(strategy_concept.dsl_template)
-            if steps:
-                program = DSLProgram(
-                    steps=steps,
-                    complexity=self._calculate_complexity(steps),
-                    description=self._generate_description(steps)
-                )
-                self.program_cache[cache_key] = program
-                return program
-                
-        # If no strategy concept or it failed, try combining other concepts
+        print("\nDEBUG - Processing suggested steps:")
+        # Convert LLM suggestions to program steps
         steps = []
-        for concept in concepts:
-            if concept.dsl_template:
-                concept_steps = self._instantiate_template(concept.dsl_template)
-                if concept_steps:
-                    steps.extend(concept_steps)
-                    
+        for suggestion in response:
+            print(f"\nProcessing step: {suggestion}")
+            primitive_name = suggestion.get('primitive')
+            if primitive_name in self.library.primitives:
+                # Get the primitive's required parameters
+                primitive = self.library.primitives[primitive_name]
+                params = suggestion.get('params', {})
+                
+                # Map any mismatched parameter names
+                param_mapping = {
+                    'value': 'pattern_value',  # Common mismatch
+                    'val': 'pattern_value',    # Another possible mismatch
+                    'pattern_value': 'value',  # For extract_shape
+                    'n': 'expansion'           # For expand_pattern
+                }
+                
+                mapped_params = {}
+                for param_name, param_value in params.items():
+                    # Use mapped name if it exists and is a required parameter
+                    mapped_name = param_mapping.get(param_name, param_name)
+                    if mapped_name in primitive.parameters:
+                        mapped_params[mapped_name] = param_value
+                    elif param_name in primitive.parameters:
+                        mapped_params[param_name] = param_value
+                
+                # Handle special cases for certain primitives
+                if 'mask' in primitive.parameters:
+                    # For any primitive that needs a mask, try to use the previous step's result
+                    if steps:
+                        mapped_params['mask'] = f"result_of_{len(steps)-1}"
+                
+                if 'pattern' in primitive.parameters:
+                    # For any primitive that needs a pattern, try to use the previous step's result
+                    if steps:
+                        mapped_params['pattern'] = f"result_of_{len(steps)-1}"
+                
+                # Store intermediate results for subsequent steps
+                # Any step could potentially be used as input for a future step
+                self.intermediate_results[f"result_of_{len(steps)}"] = None
+                
+                # Verify all required parameters are present
+                if all(param in mapped_params for param in primitive.parameters):
+                    steps.append({
+                        'primitive': primitive_name,
+                        'params': mapped_params,
+                        'description': suggestion.get('explanation', '')
+                    })
+                    print(f"Added step using primitive: {primitive_name}")
+                    print(f"With parameters: {mapped_params}")
+                else:
+                    print(f"Missing required parameters for primitive: {primitive_name}")
+                    print(f"Required: {primitive.parameters}")
+                    print(f"Provided: {list(mapped_params.keys())}")
+            else:
+                print(f"Primitive not found: {primitive_name}")
+        
         if not steps:
+            print("\nDEBUG - No valid steps could be created from suggestions")
             return None
             
-        # Create program
-        program = DSLProgram(
+        return DSLProgram(
             steps=steps,
             complexity=self._calculate_complexity(steps),
-            description=self._generate_description(steps)
+            description=f"Program synthesized from pattern analysis:\n" + 
+                       f"Strategy: {task_features.unified_strategy}\n" +
+                       "\n".join(f"Step {i+1}: {s['description']}" for i, s in enumerate(steps))
         )
-        
-        # Cache program
-        self.program_cache[cache_key] = program
-        return program
+
+    def _calculate_complexity(self, steps: List[Dict[str, Any]]) -> float:
+        """Calculate program complexity based on steps"""
+        complexity = 0.0
+        for step in steps:
+            if step['primitive'] in self.library.primitives:
+                primitive = self.library.primitives[step['primitive']]
+                complexity += primitive.complexity
+        return complexity
         
     def _instantiate_template(self, template: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Instantiate a DSL template into concrete steps"""
@@ -90,13 +175,6 @@ class DSLSynthesizer:
             })
             
         return steps
-        
-    def _calculate_complexity(self, steps: List[Dict[str, Any]]) -> float:
-        """Calculate program complexity"""
-        return sum(
-            self.library.get_primitive(step['primitive']).complexity
-            for step in steps
-        )
         
     def _generate_description(self, steps: List[Dict[str, Any]]) -> str:
         """Generate a description of the program"""
@@ -126,4 +204,6 @@ class DSLSynthesizer:
             result = self.library.execute_primitive(
                 step['primitive'], result, step.get('params', {})
             )
+            if f"result_of_{program.steps.index(step)}" in self.intermediate_results:
+                self.intermediate_results[f"result_of_{program.steps.index(step)}"] = result
         return result

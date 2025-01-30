@@ -57,14 +57,22 @@ def main():
     if not api_key:
         raise ValueError("OpenAI API key not found in environment variables")
         
-    # Initialize components
+    # Initialize components with LLM integration
     llm = LLMInterface(api_key)
-    primitive_library = DynamicPrimitiveLibrary()
+    primitive_library = DynamicPrimitiveLibrary(llm)
     concept_formation = ConceptFormation()
     curriculum = Curriculum()
-    performance_optimizer = PerformanceOptimizer()
-    dsl_synthesizer = DSLSynthesizer(primitive_library)
+    performance_optimizer = PerformanceOptimizer(llm, primitive_library)
+    dsl_synthesizer = DSLSynthesizer(primitive_library, llm)
     task_analyzer = TaskAnalyzer(llm, concept_formation)
+    
+    task_manager = TaskManager(
+        task_analyzer=task_analyzer,
+        dsl_synthesizer=dsl_synthesizer,
+        concept_formation=concept_formation,
+        curriculum=curriculum,
+        performance_optimizer=performance_optimizer
+    )
     
     while True:
         print("\n=== ARC Task Analysis ===")
@@ -72,11 +80,12 @@ def main():
         print("2) View curriculum")
         print("3) View concepts")
         print("4) View primitives")
-        print("5) Exit")
+        print("5) View learning history")
+        print("6) Exit")
         
-        choice = input("\nEnter your choice (1-5): ")
+        choice = input("\nEnter your choice (1-6): ")
         
-        if choice == '5':
+        if choice == '6':
             break
             
         elif choice == '1':
@@ -93,156 +102,106 @@ def main():
                 print("\nAnalyzing task patterns...")
                 
                 # Analyze task
-                result = task_analyzer.analyze_task(task_data)
+                task_features = task_analyzer.analyze_task(task_data)
                 
                 # Display results
                 print("\n" + "═" * 50)
                 print("Task Analysis Results")
                 print("═" * 50)
                 
-                # Task properties section
                 print("\nTask Properties:")
-                print("─" * 25)
-                print(f"Grid Size: {result.grid_size}")
-                print(f"Unique Colors: {result.unique_colors}")
-                print(f"Complexity: {result.pattern_complexity:.2f}")
-                print(f"Difficulty: {result.overall_difficulty:.2f}")
+                print("─" * 33)
+                print(f"Grid Size: {task_features.grid_size}")
+                print(f"Unique Colors: {task_features.unique_colors}")
+                print(f"Complexity: {task_features.pattern_complexity:.2f}")
+                print(f"Difficulty: {task_features.overall_difficulty:.2f}")
                 
-                # Patterns section
                 print("\nIdentified Patterns:")
-                print("─" * 25)
-                if result.identified_patterns:
-                    for category, patterns in result.identified_patterns.items():
-                        if patterns:  # Only show categories with patterns
-                            has_non_unified = any(not p.get('is_unified_strategy', False) for p in patterns)
-                            if has_non_unified:
-                                print(f"\n{category.title()}:")
-                                for pattern in patterns:
-                                    if pattern.get('is_unified_strategy'):
-                                        continue
-                                    desc = pattern.get('description', '').rstrip('.')
-                                    print(f"• {desc}")
-                    
-                    # Show unified strategy at the end
-                    unified_found = False
-                    for pattern in result.identified_patterns.get('abstract', []):
-                        if pattern.get('is_unified_strategy'):
-                            print("\nUnified Strategy:")
-                            print("─" * 25)
-                            desc = pattern.get('description', 'No unified strategy found').rstrip('.')
-                            print(f"• {desc}")
-                            unified_found = True
-                            break
-                else:
-                    print("No patterns identified")
-                    
-                # Confidence scores section
-                print("\nConfidence Scores:")
-                print("─" * 25)
-                if result.confidence_scores:
-                    max_category_len = max(len(category) for category in result.confidence_scores.keys())
-                    for category, score in result.confidence_scores.items():
-                        category_padded = category.title().ljust(max_category_len)
-                        score_str = f"{score:.2f}"
-                        print(f"{category_padded}: {score_str}")
-                else:
-                    print("No confidence scores available")
-                    
-                # Show extracted concepts
-                print("\nExtracted Concepts:")
-                print("─" * 25)
-                if result.extracted_concepts:
-                    for concept in result.extracted_concepts:
-                        print(f"\n{concept.name.title()}:")
-                        print(f"• Description: {concept.description}")
-                        if concept.dsl_template:
-                            print("• DSL Template:")
-                            for step in concept.dsl_template:
-                                params = ", ".join(f"{k}={v}" for k, v in step.get('params', {}).items())
-                                print(f"  - {step['primitive']}({params})")
-                else:
-                    print("No concepts extracted")
-                    
-                # Generate and test DSL program
-                print("\nGenerating DSL Program...")
-                print("─" * 25)
-                program = dsl_synthesizer.synthesize_program(result)
+                print("─" * 33)
+                print(f"\nObject:\n• {task_features.identified_patterns.get('object', '')}")
+                print(f"\nTransformation:\n• {task_features.identified_patterns.get('transformation', '')}")
+                print(f"\nRelationship:\n• {task_features.identified_patterns.get('relationship', '')}")
+                print(f"\nAbstract:\n• {task_features.identified_patterns.get('abstract', '')}")
                 
+                print("\nUnified Strategy:")
+                print("─" * 33)
+                strategy = task_features.unified_strategy or "No unified strategy identified yet"
+                print(strategy)
+                
+                print("\nConfidence Scores:")
+                print("─" * 33)
+                for pattern_type, score in task_features.confidence_scores.items():
+                    print(f"{pattern_type:<12}: {score:.2f}")
+                
+                print("\nExtracted Concepts:")
+                print("─" * 33)
+                for concept in task_features.extracted_concepts:
+                    print(f"\n{concept.name}:")
+                    print(f"• Description: {concept.description}")
+                
+                print("\nGenerating DSL Program...")
+                print("─" * 33)
+                
+                # Generate and optimize program
+                program = dsl_synthesizer.synthesize_program(task_features)
                 if program:
-                    print(program.description)
+                    # Evaluate initial performance
+                    success_rate = performance_optimizer._evaluate_program(program, task_data)
+                    print(f"\nInitial Success Rate: {success_rate:.2f}")
                     
-                    # Test program on training examples
-                    print("\nTesting Program:")
-                    print("─" * 25)
-                    success = 0
-                    total = 0
-                    
-                    for example in task_data['train']:
-                        input_grid = np.array(example['input'])
-                        expected = np.array(example['output'])
-                        actual = dsl_synthesizer.execute_program(program, input_grid)
+                    # Optimize if needed
+                    if success_rate < 0.9:
+                        print("\nOptimizing program...")
+                        program = performance_optimizer.optimize_program(
+                            program, task_data, task_features, success_rate
+                        )
+                        new_success = performance_optimizer._evaluate_program(program, task_data)
+                        print(f"Optimized Success Rate: {new_success:.2f}")
                         
-                        matches = np.array_equal(actual, expected)
-                        total += 1
-                        if matches:
-                            success += 1
-                        
-                        print(f"Example {total}: {'✓' if matches else '✗'}")
-                    
-                    success_rate = success / total if total > 0 else 0
-                    print(f"\nSuccess Rate: {success_rate:.0%}")
-                    
-                    # Update curriculum based on performance
-                    curriculum.update_progress(success_rate)
+                        if new_success > success_rate:
+                            print("\nOptimization improved performance!")
+                            if primitive_library.primitive_history:
+                                print("New primitives learned:", len(primitive_library.primitive_history))
                 else:
                     print("Could not generate a DSL program for this task")
-                    
-                print("\n" + "═" * 50)
                 
-            except FileNotFoundError:
-                print(f"Error: File {task_path} not found")
-            except json.JSONDecodeError:
-                print(f"Error: File {task_path} is not valid JSON")
             except Exception as e:
-                print(f"Error processing task: {str(e)}")
-                import traceback
-                print("\nFull error traceback:")
-                traceback.print_exc()
+                print(f"Error processing task: {e}")
                 
         elif choice == '2':
-            # View curriculum status
             print("\nCurriculum Status:")
-            print("─" * 25)
-            print(f"Current Level: {curriculum.current_level:.2f}")
-            print("\nFocus Areas:")
-            for area in curriculum.focus_areas:
-                print(f"• {area}")
-                
+            print("─" * 33)
+            # Add curriculum viewing logic
+            
         elif choice == '3':
-            # View learned concepts
             print("\nLearned Concepts:")
-            print("─" * 25)
-            if concept_formation.concepts:
-                for name, concept in concept_formation.concepts.items():
-                    print(f"\n{name.title()}:")
-                    print(f"• Description: {concept.description}")
-                    print(f"• Usage Count: {concept.usage_count}")
-                    print(f"• Success Rate: {concept.success_rate:.0%}")
-            else:
-                print("No concepts learned yet")
-                
+            print("─" * 33)
+            # Add concept viewing logic
+            
         elif choice == '4':
-            # View available primitives
-            print("\nAvailable DSL Primitives:")
-            print("─" * 25)
-            for name in primitive_library.list_primitives():
-                primitive = primitive_library.get_primitive(name)
-                params = ", ".join(primitive.parameters)
-                print(f"\n{name}({params}):")
-                print(f"• {primitive.description}")
-                print(f"• Complexity: {primitive.complexity:.2f}")
+            print("\nAvailable Primitives:")
+            print("─" * 33)
+            for name, primitive in primitive_library.primitives.items():
+                print(f"\n{name}:")
+                print(f"• Description: {primitive.description}")
+                print(f"• Success Rate: {primitive.success_rate:.2f}")
                 print(f"• Usage Count: {primitive.usage_count}")
-                print(f"• Success Rate: {primitive.success_rate:.0%}")
                 
+        elif choice == '5':
+            print("\nLearning History:")
+            print("─" * 33)
+            print("\nPrimitive Learning History:")
+            for entry in primitive_library.primitive_history:
+                print(f"\nTimestamp: {entry['timestamp']}")
+                print(f"Primitive: {entry['primitive'].name}")
+                print(f"Success Rate: {entry['performance_data']['success_rate']:.2f}")
+                
+            print("\nOptimization History:")
+            for entry in performance_optimizer.optimization_history:
+                print(f"\nOriginal Success: {entry['original_success']:.2f}")
+                print(f"Optimized Success: {entry['optimized_success']:.2f}")
+                if 'feedback' in entry:
+                    print("Improvements:", entry['feedback'].get('failure_analysis', ''))
+
 if __name__ == "__main__":
     main()

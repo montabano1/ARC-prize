@@ -13,6 +13,7 @@ class TaskFeatures:
     identified_patterns: Dict[str, List[Dict[str, Any]]]
     confidence_scores: Dict[str, float]
     extracted_concepts: List[Concept]
+    unified_strategy: str = ""
 
 class TaskAnalyzer:
     def __init__(self, llm: LLMInterface, concept_formation: ConceptFormation):
@@ -60,9 +61,20 @@ class TaskAnalyzer:
             ),
             identified_patterns=patterns,
             confidence_scores=confidence_by_category,
-            extracted_concepts=[]  # Temporary empty list
+            extracted_concepts=[],  # Temporary empty list
+            unified_strategy=""
         ))
         
+        # Extract unified strategy from patterns
+        unified_strategy = ""
+        for pattern_list in patterns.values():
+            for pattern in pattern_list:
+                if isinstance(pattern, dict) and pattern.get('is_unified_strategy'):
+                    unified_strategy = pattern.get('description', '')
+                    break
+            if unified_strategy:
+                break
+
         return TaskFeatures(
             grid_size=input_grid.shape,
             unique_colors=len(np.unique(input_grid)),
@@ -75,7 +87,8 @@ class TaskAnalyzer:
             ),
             identified_patterns=patterns,
             confidence_scores=confidence_by_category,
-            extracted_concepts=concepts
+            extracted_concepts=concepts,
+            unified_strategy=unified_strategy
         )
         
     def _calculate_pattern_complexity(self, input_grid: np.ndarray, 
