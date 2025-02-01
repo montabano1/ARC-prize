@@ -115,8 +115,7 @@ class PerformanceOptimizer:
             messages=[
                 {"role": "system", "content": "You are an expert at analyzing and improving visual pattern transformation programs."},
                 {"role": "user", "content": prompt}
-            ],
-            temperature=0.7
+            ]
         )
         
         try:
@@ -215,8 +214,7 @@ class PerformanceOptimizer:
             messages=[
                 {"role": "system", "content": "You are an expert at optimizing visual pattern transformation programs."},
                 {"role": "user", "content": prompt}
-            ],
-            temperature=0.5
+            ]
         )
         
         try:

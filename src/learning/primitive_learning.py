@@ -2,10 +2,14 @@ from typing import Dict, List, Any, Optional
 import numpy as np
 from dataclasses import dataclass
 import json
-from src.dsl.primitives import DSLPrimitive
+from src.dsl.primitives import DynamicPrimitiveLibrary  # Import DynamicPrimitiveLibrary
 from src.llm.llm_interface import LLMInterface
 from src.utils.json_validator import JSONValidator
 import time
+import logging
+from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class PrimitiveEvolution:
@@ -19,13 +23,16 @@ class PrimitiveEvolution:
 class DynamicPrimitiveLearner:
     """System for learning new primitive operations"""
     
-    def __init__(self, llm: LLMInterface):
+    def __init__(self, llm: LLMInterface, state_manager=None):
         self.llm = llm
-        self.primitives = {}  # id -> primitive
+        self.state_manager = state_manager
+        self.primitive_library = DynamicPrimitiveLibrary(llm)  # Initialize primitive library
+        self.primitives = self.primitive_library.primitives  # Use primitives from library
         self.evolution_history = {}  # id -> list of changes
         self.primitive_combinations = []  # Successful combinations
         self.failed_attempts = []  # Failed primitive attempts
         self.feedback_threshold = 0.7
+        self.primitive_stats = {}
         
     async def discover_primitive(self, task_data: Dict[str, Any], solution: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Discover new primitive operations from successful solutions"""
@@ -132,6 +139,17 @@ Return your primitive definition in valid JSON format:"""
                     current_retry += 1
                     continue
 
+                # Record primitive learning in state manager
+                if self.state_manager:
+                    primitive_data = {
+                        'id': f"primitive_{primitive['id']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                        'name': primitive['name'],
+                        'success': True,
+                        'context': task_data,
+                        'stats': primitive_item
+                    }
+                    self.state_manager.record_pattern(primitive_data, success=True)
+                    
                 return primitive_item
 
             except Exception as e:
@@ -539,3 +557,90 @@ Suggest adaptations in JSON format:
             
         except (json.JSONDecodeError, KeyError):
             pass
+
+    def learn_from_success(self, task_data: Dict[str, Any], result: Dict[str, Any]):
+        """Learn from a successful task execution"""
+        primitives_used = result.get('primitives_used', [])
+        context = {
+            'input_size': task_data.get('input_size'),
+            'output_size': task_data.get('output_size'),
+            'task_type': task_data.get('task_type')
+        }
+        
+        for primitive in primitives_used:
+            if primitive not in self.primitives:
+                self.primitives[primitive] = {
+                    'name': primitive,
+                    'success_count': 0,
+                    'total_uses': 0,
+                    'contexts': []
+                }
+                
+            # Update primitive stats
+            self.primitives[primitive]['success_count'] += 1
+            self.primitives[primitive]['total_uses'] += 1
+            self.primitives[primitive]['contexts'].append(context)
+            
+            # Record primitive learning in state manager
+            if self.state_manager:
+                primitive_data = {
+                    'id': f"primitive_{primitive}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                    'name': primitive,
+                    'success': True,
+                    'context': context,
+                    'stats': self.primitives[primitive]
+                }
+                self.state_manager.record_pattern(primitive_data, success=True)
+                
+                # Record meta-insight if primitive is highly successful
+                success_rate = (self.primitives[primitive]['success_count'] / 
+                              self.primitives[primitive]['total_uses'])
+                if success_rate > 0.9 and self.primitives[primitive]['total_uses'] > 5:
+                    self.state_manager.record_meta_insight(
+                        f"Primitive '{primitive}' shows consistent high performance " +
+                        f"({success_rate:.2%} success rate over {self.primitives[primitive]['total_uses']} uses) " +
+                        f"for {context['task_type']} tasks",
+                        importance=0.85
+                    )
+    
+    def get_relevant_primitives(self, task_data: Dict[str, Any]) -> List[str]:
+        """Get primitives relevant to the given task"""
+        context = {
+            'input_size': task_data.get('input_size'),
+            'output_size': task_data.get('output_size'),
+            'task_type': task_data.get('task_type')
+        }
+        
+        relevant_primitives = []
+        for name, stats in self.primitives.items():
+            # Check if primitive has been successful in similar contexts
+            for past_context in stats['contexts']:
+                if self._context_similarity(context, past_context) > 0.7:
+                    success_rate = stats['success_count'] / max(1, stats['total_uses'])
+                    if success_rate > 0.6:  # Consider primitives with >60% success rate
+                        relevant_primitives.append(name)
+                        break
+                        
+        return relevant_primitives
+        
+    def _context_similarity(self, context1: Dict[str, Any], context2: Dict[str, Any]) -> float:
+        """Calculate similarity between two contexts"""
+        similarity = 0.0
+        total_weights = 0.0
+        
+        # Compare input sizes (weight: 0.3)
+        if context1.get('input_size') == context2.get('input_size'):
+            similarity += 0.3
+        total_weights += 0.3
+        
+        # Compare output sizes (weight: 0.3)
+        if context1.get('output_size') == context2.get('output_size'):
+            similarity += 0.3
+        total_weights += 0.3
+        
+        # Compare task types (weight: 0.4)
+        if context1.get('task_type') == context2.get('task_type'):
+            similarity += 0.4
+        total_weights += 0.4
+        
+        return similarity / total_weights if total_weights > 0 else 0.0

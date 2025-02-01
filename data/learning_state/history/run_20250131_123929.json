@@ -1,0 +1,51 @@
+{
+  "timestamp": "2025-01-31T12:39:29.449723",
+  "context": {
+    "input_shape": [
+      3,
+      3
+    ],
+    "output_shape": [
+      3,
+      3
+    ],
+    "input_values": [
+      0,
+      1
+    ],
+    "output_values": [
+      0,
+      1
+    ],
+    "num_examples": 2,
+    "insights": [],
+    "patterns": [],
+    "complexity_estimate": 0.5
+  },
+  "patterns": [
+    {
+      "pattern": "Matrix Manipulation",
+      "evidence": [
+        "strategy_0",
+        "strategy_0"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "pattern": "Conditional Operations",
+      "evidence": [
+        "strategy_0"
+      ],
+      "confidence": 1.0
+    },
+    {
+      "pattern": "Layer-specific Transformation",
+      "evidence": [
+        "strategy_0"
+      ],
+      "confidence": 1.0
+    }
+  ],
+  "success": true,
+  "input_size": 3
+}

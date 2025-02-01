@@ -1,23 +1,20 @@
-import os
-import json
+import sys
+import traceback
 import numpy as np
-import logging
-import asyncio
 from dotenv import load_dotenv
-from src.llm.llm_interface import LLMInterface
-from src.learning.learning_orchestrator import LearningOrchestrator
+import os
+import asyncio
+import json
+import glob
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,  # Changed to DEBUG level
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'  # Added timestamp, module name and level
-)
-logger = logging.getLogger(__name__)
-
-# Disable debug logging for other modules
-logging.getLogger('openai').setLevel(logging.WARNING)
-logging.getLogger('httpx').setLevel(logging.WARNING)
-logging.getLogger('httpcore').setLevel(logging.WARNING)
+def handle_error(e: Exception):
+    """Handle error by printing full info and exiting"""
+    print("\nError occurred:", file=sys.stderr)
+    print(f"Error type: {type(e).__name__}", file=sys.stderr)
+    print(f"Error message: {str(e)}", file=sys.stderr)
+    print("\nFull traceback:", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    sys.exit(1)
 
 def display_grid(grid):
     """Display a grid in a readable format."""
@@ -25,33 +22,14 @@ def display_grid(grid):
         grid = np.array(grid)
     print(grid)
 
-async def main():
-    """Main function to run the learning system"""
+def load_puzzle(puzzle_path: str = None):
+    """Load a puzzle from file or use default example"""
+    if puzzle_path:
+        with open(puzzle_path, 'r') as f:
+            return json.load(f)
     
-    # Load environment variables
-    print("Loading environment variables...")
-    load_dotenv()
-    
-    # Get API key
-    print("Getting API key...")
-    api_key = os.getenv('OPENAI_API_KEY')
-    if not api_key:
-        raise ValueError("No OpenAI API key found in environment variables")
-    print("API key loaded successfully")
-    
-    # Initialize LLM interface
-    print("Initializing LLM interface...")
-    llm = LLMInterface(api_key)
-    print("LLM interface initialized")
-    
-    # Initialize learning system
-    print("Initializing learning system...")
-    learning_orchestrator = LearningOrchestrator(llm)
-    print("Learning system initialized")
-    
-    # Load example task
-    print("Loading example task...")
-    task_data = {
+    # Return default example if no path provided
+    return {
         'train': [
             {
                 'input': [[0, 0, 0],
@@ -87,51 +65,162 @@ async def main():
             }
         ]
     }
-    print("Example task loaded")
+
+def list_available_puzzles(puzzle_dir: str):
+    """List all available puzzle files"""
+    puzzle_files = glob.glob(os.path.join(puzzle_dir, "*.json"))
+    if not puzzle_files:
+        print("No puzzle files found in", puzzle_dir)
+        return []
     
-    print("Starting to learn from task...")
-    # Learn from task
-    await learning_orchestrator.learn_from_task(task_data)
-    print("Finished learning from task")
-    
-    # Print training examples
-    print("\nTraining examples:\n")
-    for i, example in enumerate(task_data['train'], 1):
-        print(f"Example {i}:")
-        print("Input:")
-        print(np.array(example['input']))
-        print("\nOutput:")
-        print(np.array(example['output']))
-        print()
-    
-    print("Learning unified strategy from all examples...\n")
-    
-    # Print test examples and solve
-    print("\nTesting examples:\n")
-    for i, test in enumerate(task_data['test'], 1):
-        print(f"Test {i}:")
-        print("Input:")
-        print(np.array(test['input']))
-        print("\nExpected Output:")
-        print(np.array(test['output']))
-        print()
+    print("\nAvailable puzzles:")
+    for i, path in enumerate(puzzle_files, 1):
+        name = os.path.basename(path)
+        print(f"{i}. {name}")
+    return puzzle_files
+
+async def main():
+    """Main function to run the learning system"""
+    try:
+        # Load environment variables
+        load_dotenv()
         
-        # Try to solve the test case
-        solution = await learning_orchestrator.solve_task(test)
-        if solution and 'output' in solution:
-            print("\nGenerated Output:")
-            print(np.array(solution['output']))
-            
-            # Calculate accuracy
-            if isinstance(solution['output'], list):
-                actual = np.array(solution['output'])
-                expected = np.array(test['output'])
-                accuracy = np.mean(actual == expected) * 100
-                print(f"\nAccuracy: {accuracy:.2f}%")
-            else:
-                print("\nCould not calculate accuracy - output is not a list")
+        # Get API key
+        api_key = os.getenv('OPENAI_API_KEY')
+        if not api_key:
+            raise ValueError("No OpenAI API key found in environment variables")
+        
+        # Initialize components
+        from src.llm.llm_interface import LLMInterface
+        from src.learning.learning_orchestrator import LearningOrchestrator
+        from src.dsl.synthesizer import DSLProgram, DSLPrimitive
+        
+        llm = LLMInterface()
+        learning_orchestrator = LearningOrchestrator()
+        
+        # Check for puzzles directory
+        puzzle_dir = os.path.join(os.path.dirname(__file__), "..", "puzzles")
+        if not os.path.exists(puzzle_dir):
+            os.makedirs(puzzle_dir)
+            print("\nCreated puzzles directory. Please add your puzzle JSON files there.")
+            print("Using default example puzzle for now...")
+            task_data = load_puzzle()
         else:
-            print("\nNo solution generated")
+            # List available puzzles
+            puzzle_files = list_available_puzzles(puzzle_dir)
             
+            if puzzle_files:
+                try:
+                    choice = input("\nEnter puzzle number to solve (or press Enter for default example): ")
+                except (EOFError, KeyboardInterrupt):
+                    print("\nUsing default example...")
+                    task_data = load_puzzle()
+                else:
+                    if not choice:
+                        print("\nUsing default example puzzle...")
+                        task_data = load_puzzle()
+                    else:
+                        try:
+                            idx = int(choice) - 1
+                            if 0 <= idx < len(puzzle_files):
+                                print(f"\nLoading puzzle: {os.path.basename(puzzle_files[idx])}")
+                                task_data = load_puzzle(puzzle_files[idx])
+                            else:
+                                print("Invalid choice. Using default example...")
+                                task_data = load_puzzle()
+                        except ValueError:
+                            print("Invalid input. Using default example...")
+                            task_data = load_puzzle()
+            else:
+                print("\nUsing default example puzzle...")
+                task_data = load_puzzle()
+        
+        # Display training examples
+        print("\nAnalyzing training examples...")
+        for i, example in enumerate(task_data['train'], 1):
+            print(f"\nTraining Example {i}:")
+            print("Input:")
+            display_grid(example['input'])
+            print("\nOutput:")
+            display_grid(example['output'])
+        
+        # Learn from task
+        result = await learning_orchestrator.learn_from_task(task_data)
+        
+        # Get next task based on performance
+        accuracy = result.get('accuracy', 0.0)
+        next_task = await learning_orchestrator.curriculum_manager.select_next_task(accuracy)
+        
+        # Print results
+        if result.get('patterns'):
+            print("\nIdentified Patterns:")
+            for pattern in result['patterns']:
+                print(f"- {pattern.get('description', 'No description available')}")
+                
+        if result.get('strategy'):
+            print("\nGenerated Strategy:")
+            print(result['strategy'].get('description', 'No strategy description available'))
+            
+        if result.get('progress'):
+            print("\nLearning Progress:")
+            print(f"Overall Progress: {result['progress'].get('overall_progress', 0.0):.2%}")
+            
+        if next_task:
+            print(f"\nNext recommended task: {next_task}")
+        else:
+            print("\nNo next task recommended.")
+        
+        # Process test example
+        print("\nTest Example:")
+        print("Input:")
+        display_grid(task_data['test'][0]['input'])
+        print("\nExpected Output:")
+        display_grid(task_data['test'][0]['output'])
+        
+        # Get explanation from LLM
+        print("\nChatGPT: Analyzing the pattern...")
+        explanation = await llm.explain_strategy({
+            'task': task_data,
+            'context': {'task_type': 'grid_transformation'}
+        })
+        if explanation:
+            print("\nI've identified the pattern. In all examples, we need to:")
+            print(explanation)
+        else:
+            print("\nI apologize, but I'm having trouble explaining this pattern clearly.")
+        
+        # Generate and validate hypothesis
+        print("\nChatGPT: Generating hypothesis...")
+        hypothesis = await learning_orchestrator.hypothesis_former.form_hypothesis(task_data['train'])
+        if hypothesis:
+            print("\nHypothesis generated successfully!")
+            print(hypothesis.get('description', 'No description available'))
+            
+            # Validate hypothesis
+            print("\nValidating hypothesis...")
+            validation = await learning_orchestrator.pattern_validator.validate_pattern(
+                hypothesis,
+                task_data['train']
+            )
+            if validation.get('is_valid'):
+                print("\nThe hypothesis has been validated! The pattern is consistent across all examples.")
+            else:
+                print("\nThe hypothesis needs refinement. Some inconsistencies were found.")
+        else:
+            print("\nI was unable to form a clear hypothesis for this pattern.")
+        
+        # Check for knowledge gaps
+        gaps = await learning_orchestrator.curriculum_manager.identify_knowledge_gaps()
+        if gaps:
+            print("\nChatGPT: I've identified some areas where we need more practice:", ", ".join(gaps))
+        
+        # Ask if user wants to try another puzzle
+        choice = input("\nWould you like to try another puzzle? (y/n): ")
+        if choice.lower() == 'y':
+            await main()
+        
+    except Exception as e:
+        handle_error(e)
+
 if __name__ == "__main__":
     asyncio.run(main())

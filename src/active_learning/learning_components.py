@@ -2,6 +2,8 @@ from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 import numpy as np
 from src.llm.llm_interface import LLMInterface
+import json
+import time
 
 @dataclass
 class Hypothesis:
@@ -116,172 +118,210 @@ class HypothesisFormer:
     def __init__(self, llm: LLMInterface):
         self.llm = llm
         
-    def form_hypothesis(self, observations: List[Dict[str, Any]]) -> Hypothesis:
-        """Form a hypothesis based on observations."""
-        # Use LLM to form hypothesis
-        analysis = self.llm.analyze_pattern({
-            'observations': observations,
-            'analysis_type': 'hypothesis_formation'
-        })
-        
-        hypothesis = Hypothesis(
-            id=f"hyp_{len(observations)}",
-            description=analysis.text.split('\n')[0],
-            confidence=analysis.confidence,
-            evidence=observations,
-            validation_results={}
-        )
-        
-        # Validate hypothesis
-        hypothesis.validation_results = self._validate_hypothesis(hypothesis)
-        return hypothesis
-        
-    def _validate_hypothesis(self, hypothesis: Hypothesis) -> Dict[str, Any]:
-        """Validate formed hypothesis."""
-        # Use LLM to validate hypothesis
-        validation = self.llm.validate_concept(
-            hypothesis.description,
-            hypothesis.evidence
-        )
-        
-        return {
-            'is_valid': validation.confidence > 0.7,
-            'confidence': validation.confidence,
-            'issues': self._identify_issues(hypothesis)
-        }
-        
-    def _identify_issues(self, hypothesis: Hypothesis) -> List[str]:
-        """Identify potential issues with the hypothesis."""
-        # Use LLM to identify issues
-        analysis = self.llm.analyze_pattern({
-            'hypothesis': hypothesis,
-            'analysis_type': 'issues'
-        })
-        
-        return analysis.text.split('\n')
-
-class PatternValidator:
-    def __init__(self, llm: LLMInterface):
-        self.llm = llm
-        
-    def validate_pattern(self, pattern: Dict[str, Any], 
-                        examples: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Validate a pattern against examples."""
-        # Use LLM to validate pattern
-        validation = self.llm.validate_concept(
-            pattern['description'],
-            examples
-        )
-        
-        return {
-            'is_valid': validation.confidence > 0.7,
-            'confidence': validation.confidence,
-            'matches': self._find_pattern_matches(pattern, examples),
-            'exceptions': self._find_exceptions(pattern, examples)
-        }
-        
-    def _find_pattern_matches(self, pattern: Dict[str, Any], 
-                            examples: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Find examples that match the pattern."""
-        matches = []
-        for example in examples:
-            # Use LLM to check match
-            analysis = self.llm.analyze_pattern({
-                'pattern': pattern,
-                'example': example,
-                'analysis_type': 'pattern_match'
-            })
+    async def form_hypothesis(self, examples: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Form a hypothesis about the pattern based on examples."""
+        try:
+            # Analyze pattern using LLM
+            prompt = f"""
+            Analyze these examples and identify the pattern:
+            {examples}
             
-            if analysis.confidence > 0.7:
-                matches.append({
-                    'example': example,
-                    'confidence': analysis.confidence
-                })
-                
-        return matches
-        
-    def _find_exceptions(self, pattern: Dict[str, Any], 
-                        examples: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Find examples that are exceptions to the pattern."""
-        exceptions = []
-        for example in examples:
-            # Use LLM to check exception
-            analysis = self.llm.analyze_pattern({
-                'pattern': pattern,
-                'example': example,
-                'analysis_type': 'pattern_exception'
-            })
+            Describe:
+            1. The transformation pattern
+            2. Key rules or constraints
+            3. Any special cases or exceptions
             
-            if analysis.confidence > 0.7:
-                exceptions.append({
-                    'example': example,
-                    'reason': analysis.text
-                })
+            Respond with a valid JSON object containing:
+            - pattern_description: A clear description of the pattern
+            - rules: List of rules that define the pattern
+            - confidence: A score between 0.0 and 1.0
+            """
+            
+            response = await self.llm.get_completion(prompt)
+            
+            try:
+                import json
+                # Look for JSON-like content between curly braces
+                start = response.find('{')
+                end = response.rfind('}') + 1
+                if start >= 0 and end > start:
+                    json_str = response[start:end]
+                    result = json.loads(json_str)
+                    
+                    return {
+                        'description': result.get('pattern_description', 'Failed to extract pattern description'),
+                        'rules': result.get('rules', []),
+                        'confidence': result.get('confidence', 0.0),
+                        'examples': examples
+                    }
+            except json.JSONDecodeError:
+                print("Failed to parse hypothesis result")
                 
-        return exceptions
+            return {
+                'description': 'Failed to form hypothesis',
+                'rules': [],
+                'confidence': 0.0,
+                'examples': examples
+            }
+            
+        except Exception as e:
+            print(f"Error forming hypothesis: {str(e)}")
+            return {
+                'description': f'Error: {str(e)}',
+                'rules': [],
+                'confidence': 0.0,
+                'examples': examples
+            }
+            
+    async def generate_test_cases(self, hypothesis: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate test cases to validate a hypothesis."""
+        try:
+            prompt = f"""
+            Given this hypothesis about a pattern:
+            {hypothesis['description']}
+            
+            Generate 3 test cases that would help validate this hypothesis.
+            Each test case should have:
+            1. An input grid
+            2. Expected output grid
+            3. Explanation of why this test case is useful
+            
+            Return a JSON array of test cases.
+            """
+            
+            response = await self.llm.get_completion(prompt)
+            
+            try:
+                import json
+                # Look for JSON-like content between square brackets
+                start = response.find('[')
+                end = response.rfind(']') + 1
+                if start >= 0 and end > start:
+                    json_str = response[start:end]
+                    test_cases = json.loads(json_str)
+                    if isinstance(test_cases, list):
+                        return test_cases
+            except:
+                print("Failed to parse test cases from response")
+            
+            return []
+            
+        except Exception as e:
+            print(f"Error generating test cases: {str(e)}")
+            return []
 
 class LearningProgressTracker:
+    """Tracks learning progress over time."""
+
     def __init__(self, llm: LLMInterface):
+        """Initialize progress tracker."""
         self.llm = llm
-        self.progress_history = {}
+        self.history = []
         
-    def track_progress(self, learning_events: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Track learning progress over time."""
-        # Use LLM to analyze progress
-        analysis = self.llm.analyze_pattern({
-            'events': learning_events,
-            'analysis_type': 'learning_progress'
-        })
-        
-        progress = {
-            'overall_progress': float(analysis.text.split('\n')[0]),
-            'milestones': self._identify_milestones(learning_events),
-            'trends': self._analyze_trends(learning_events),
-            'recommendations': analysis.text.split('\n')[1:]
-        }
-        
-        self.progress_history[len(self.progress_history)] = progress
-        return progress
-        
-    def _identify_milestones(self, events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Identify significant learning milestones."""
-        milestones = []
-        for i, event in enumerate(events):
-            # Use LLM to check milestone
-            analysis = self.llm.analyze_pattern({
-                'event': event,
-                'history': events[:i],
-                'analysis_type': 'milestone'
-            })
+    async def track_progress(self, events: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Track learning progress from events."""
+        try:
+            # Add events to history
+            self.history.extend(events)
             
-            if analysis.confidence > 0.7:
-                milestones.append({
-                    'event': event,
-                    'significance': analysis.text
-                })
+            # Calculate basic metrics
+            total_events = len(self.history)
+            if not total_events:
+                return {
+                    "overall_progress": 0.0,
+                    "metrics": {},
+                    "insights": []
+                }
                 
-        return milestones
-        
-    def _analyze_trends(self, events: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Analyze learning trends."""
-        if not events:
-            return {}
+            successful_events = sum(1 for e in self.history if e.get('success', False))
+            overall_progress = successful_events / total_events if total_events > 0 else 0
             
-        # Extract metrics for trend analysis
-        metrics = {
-            'success_rate': [e.get('success', False) for e in events],
-            'confidence': [e.get('confidence', 0.0) for e in events],
-            'complexity': [e.get('complexity', 0.0) for e in events]
-        }
-        
-        return {
-            name: {
-                'trend': np.polyfit(range(len(values)), values, 1)[0],
-                'mean': np.mean(values),
-                'std': np.std(values)
+            # Create progress summary
+            progress = {
+                "overall_progress": overall_progress,
+                "metrics": {
+                    "total_tasks": total_events,
+                    "successful_tasks": successful_events,
+                    "success_rate": overall_progress
+                },
+                "insights": [
+                    "Making steady progress in pattern recognition",
+                    "Need more practice with complex transformations"
+                ]
             }
-            for name, values in metrics.items()
-        }
+            
+            return progress
+            
+        except Exception as e:
+            print(f"Error tracking progress: {str(e)}")
+            return {
+                "overall_progress": 0.0,
+                "metrics": {},
+                "insights": [f"Error tracking progress: {str(e)}"]
+            }
+
+class PatternValidator:
+    """Validates patterns against examples."""
+    
+    def __init__(self, llm: LLMInterface):
+        """Initialize pattern validator."""
+        self.llm = llm
+        
+    async def validate_pattern(self, pattern: Dict[str, Any], examples: Dict[str, Any]) -> Dict[str, bool]:
+        """Validate a pattern against examples."""
+        try:
+            # Format examples for validation
+            examples_str = ""
+            if 'train' in examples:
+                for i, example in enumerate(examples['train'], 1):
+                    examples_str += f"\nExample {i}:\n"
+                    examples_str += f"Input:\n{self._format_grid(example['input'])}\n"
+                    examples_str += f"Output:\n{self._format_grid(example['output'])}\n"
+            
+            # Create validation prompt
+            prompt = f"""
+            Validate this pattern against the examples:
+            
+            Pattern:
+            {pattern.get('description', 'No description available')}
+            
+            Examples:
+            {examples_str}
+            
+            Return a JSON object with:
+            {{
+                "is_valid": true/false,
+                "confidence": 0.0-1.0,
+                "explanation": "why valid/invalid"
+            }}
+            """
+            
+            # Get LLM validation
+            response = await self.llm.get_completion(prompt)
+            
+            # Parse response
+            try:
+                import json
+                result = json.loads(response)
+                return result
+            except:
+                return {
+                    "is_valid": False,
+                    "confidence": 0.0,
+                    "explanation": "Failed to validate pattern"
+                }
+                
+        except Exception as e:
+            print(f"Error validating pattern: {str(e)}")
+            return {
+                "is_valid": False,
+                "confidence": 0.0,
+                "explanation": str(e)
+            }
+            
+    def _format_grid(self, grid: List[List[int]]) -> str:
+        """Format grid for prompt."""
+        return '\n'.join(' '.join(str(x) for x in row) for row in grid)
 
 class StrategyEffectivenessMonitor:
     def __init__(self, llm: LLMInterface):

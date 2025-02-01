@@ -20,6 +20,5 @@ solution_synthesis:
   complexity_limit: 50
 
 llm:
-  model_name: "gpt-4o-mini-2024-07-18"
-  temperature: 0.7
+  model_name: "o3-mini"
   max_tokens: 1000

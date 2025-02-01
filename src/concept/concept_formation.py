@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
+from src.llm.llm_interface import LLMInterface
 
 @dataclass
 class Concept:
@@ -15,40 +16,71 @@ class Concept:
 
 class ConceptFormation:
     """System for learning and evolving concepts"""
-    def __init__(self):
+    def __init__(self, llm: LLMInterface):
+        """Initialize concept formation."""
+        self.llm = llm
         self.concepts: Dict[str, Concept] = {}
         self.concept_relationships: Dict[str, List[str]] = {}
         
-    def extract_concepts(self, task_features: 'TaskFeatures') -> List[Concept]:
-        """Extract concepts from identified patterns"""
-        concepts = []
-        patterns = task_features.identified_patterns
-        
-        # First look for unified strategy
-        unified_strategy = self._extract_unified_strategy(patterns)
-        if unified_strategy:
-            concepts.append(unified_strategy)
-        
-        # Then extract supporting concepts from each category
-        for category, category_patterns in patterns.items():
-            category_concepts = self._extract_category_concepts(category, category_patterns)
-            concepts.extend(category_concepts)
+    async def extract_concepts(self, task_features: 'TaskFeatures') -> List[Concept]:
+        """Extract concepts from task features."""
+        try:
+            # Use LLM to identify potential concepts
+            prompt = f"""
+            Analyze these task features and identify key concepts:
             
-        # Look for relationships between concepts
-        self._update_concept_relationships(concepts)
-        
-        # Store new concepts
-        for concept in concepts:
-            if concept.name not in self.concepts:
-                self.concepts[concept.name] = concept
-            else:
-                # Update existing concept with new examples
-                existing = self.concepts[concept.name]
-                existing.examples.extend(concept.examples)
-                if concept.dsl_template:
-                    existing.dsl_template = concept.dsl_template
+            Grid Size: {task_features.grid_size}
+            Pattern Complexity: {task_features.pattern_complexity}
+            Identified Patterns: {task_features.identified_patterns}
+            
+            Extract fundamental concepts that explain:
+            1. The transformation rules
+            2. Pattern relationships
+            3. Spatial arrangements
+            4. Color/value patterns
+            
+            Return a JSON array of concepts, each with:
+            - id: string
+            - name: string
+            - description: string
+            - confidence: float (0-1)
+            """
+            
+            response = await self.llm.get_completion(prompt)
+            
+            try:
+                import json
+                concepts_data = json.loads(response)
                 
-        return concepts
+                # Convert to Concept objects
+                concepts = []
+                for data in concepts_data:
+                    concept = Concept(
+                        name=data.get('name', ''),
+                        description=data.get('description', ''),
+                        applicability_conditions=[],
+                        implementation_hints=[],
+                        examples=[],  # Will be populated during validation
+                        dsl_template=None
+                    )
+                    
+                    # Validate concept
+                    validation = await self._validate_concept(concept, task_features)
+                    concept.validation_results = validation
+                    
+                    if validation.get('is_valid', False):
+                        concepts.append(concept)
+                        self.concepts[concept.name] = concept
+                        
+                return concepts
+                
+            except json.JSONDecodeError:
+                print("Failed to parse concepts from LLM response")
+                return []
+                
+        except Exception as e:
+            print(f"Error extracting concepts: {str(e)}")
+            return []
         
     def _extract_unified_strategy(self, patterns: Dict[str, List[Dict[str, Any]]]) -> Optional[Concept]:
         """Extract the unified strategy as a high-level concept"""
@@ -161,3 +193,7 @@ class ConceptFormation:
                           for term in concept.description.lower().split()):
                         related.append(other.name)
             self.concept_relationships[concept.name] = related
+
+    async def _validate_concept(self, concept: Concept, task_features: 'TaskFeatures') -> Dict[str, Any]:
+        # TO DO: implement concept validation logic
+        return {'is_valid': True}

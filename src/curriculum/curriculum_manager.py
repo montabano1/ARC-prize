@@ -1,7 +1,9 @@
 from typing import List, Dict, Any, Optional
 import numpy as np
 from dataclasses import dataclass
-from ..task_assessment.task_analyzer import TaskFeatures
+from src.task_assessment.task_analyzer import TaskFeatures
+from src.llm.llm_interface import LLMInterface
+from src.storage.learning_state import LearningStateManager
 
 @dataclass
 class Task:
@@ -22,8 +24,14 @@ class LearningPath:
     confidence_threshold: float
 
 class CurriculumManager:
-    def __init__(self, initial_difficulty: float = 0.3,
+    """Manages the learning curriculum and task selection."""
+    
+    def __init__(self, llm: LLMInterface, state_manager: LearningStateManager,
+                 initial_difficulty: float = 0.3,
                  confidence_threshold: float = 0.8):
+        """Initialize curriculum manager."""
+        self.llm = llm
+        self.state_manager = state_manager
         self.tasks = {}
         self.current_difficulty = initial_difficulty
         self.confidence_threshold = confidence_threshold
@@ -178,3 +186,94 @@ class CurriculumManager:
                 current_level = progression.get(skill, 0.0)
                 progression[skill] = min(1.0, current_level + 0.2)
         return progression
+
+    async def select_next_task(self, current_accuracy: float) -> Dict[str, Any]:
+        """Select next task based on performance."""
+        try:
+            # Get task history and performance
+            history = self.task_history[-5:] if self.task_history else []
+            
+            # Create selection prompt
+            prompt = f"""
+            Based on current performance (accuracy: {current_accuracy:.2%}) and task history:
+            {history}
+            
+            Recommend a next task focusing on:
+            1. Areas needing improvement
+            2. Gradual difficulty progression
+            3. Skill reinforcement
+            
+            Return a JSON object with:
+            {{
+                "task_type": "string",
+                "difficulty": "beginner|intermediate|advanced",
+                "focus_areas": ["list", "of", "skills"],
+                "description": "task description"
+            }}
+            """
+            
+            # Get LLM recommendation
+            response = await self.llm.get_completion(prompt)
+            
+            # Parse response
+            try:
+                import json
+                next_task = json.loads(response)
+                return next_task
+            except:
+                return {
+                    "task_type": "practice",
+                    "difficulty": "beginner" if current_accuracy < 0.7 else "intermediate",
+                    "focus_areas": ["pattern recognition"],
+                    "description": "Practice basic pattern recognition"
+                }
+                
+        except Exception as e:
+            print(f"Error selecting next task: {str(e)}")
+            return {
+                "task_type": "review",
+                "difficulty": "beginner",
+                "focus_areas": ["fundamentals"],
+                "description": "Review fundamental concepts"
+            }
+            
+    async def identify_knowledge_gaps(self) -> List[str]:
+        """Identify knowledge gaps from learning history."""
+        try:
+            # Get recent performance data
+            history = self.task_history[-10:] if self.task_history else []
+            
+            # Create analysis prompt
+            prompt = f"""
+            Analyze this learning history to identify knowledge gaps:
+            {history}
+            
+            Return a JSON array of specific areas needing improvement:
+            ["area1", "area2", "area3"]
+            """
+            
+            # Get LLM analysis
+            response = await self.llm.get_completion(prompt)
+            
+            # Parse response
+            try:
+                import json
+                gaps = json.loads(response)
+                if isinstance(gaps, list):
+                    return gaps
+            except:
+                pass
+                
+            return ["pattern recognition", "spatial reasoning"]
+            
+        except Exception as e:
+            print(f"Error identifying knowledge gaps: {str(e)}")
+            return ["error: could not analyze gaps"]
+            
+    def update_task_history(self, task: Dict[str, Any], performance: Dict[str, Any]):
+        """Update task history with new task and performance."""
+        self.task_history.append({
+            "task": task,
+            "performance": performance,
+            "timestamp": "current_time"
+        })

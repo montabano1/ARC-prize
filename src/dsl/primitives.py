@@ -58,7 +58,7 @@ class DynamicPrimitiveLibrary:
             ),
             DSLPrimitive(
                 name="invert",
-                operation=lambda grid: 1 - grid,
+                operation=lambda grid: np.ones_like(grid) - grid,
                 parameters=[],
                 description="Invert all values in the grid",
                 complexity=0.1
@@ -149,9 +149,9 @@ class DynamicPrimitiveLibrary:
             )
         ]
         
-        # Add all primitives
+        # Add primitives to the library
         for primitive in primitives:
-            self.add_primitive(primitive)
+            self.primitives[primitive.name] = primitive
             
     def _flood_fill(self, grid, x, y, old_val, new_val):
         """Helper function for flood fill operation"""
@@ -267,8 +267,7 @@ class DynamicPrimitiveLibrary:
             messages=[
                 {"role": "system", "content": "You are an expert at designing primitive operations for visual pattern transformation. Focus on operations that are reusable across different tasks."},
                 {"role": "user", "content": prompt}
-            ],
-            temperature=0.7
+            ]
         )
         
         try:
@@ -326,8 +325,7 @@ class DynamicPrimitiveLibrary:
             messages=[
                 {"role": "system", "content": "You are an expert Python programmer specializing in numpy operations for grid transformations."},
                 {"role": "user", "content": prompt}
-            ],
-            temperature=0.2
+            ]
         )
         
         try:

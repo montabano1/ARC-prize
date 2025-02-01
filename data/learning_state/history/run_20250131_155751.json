@@ -1,0 +1,37 @@
+{
+  "timestamp": "2025-01-31T15:57:51.802334",
+  "context": {
+    "input_shape": [
+      3,
+      3
+    ],
+    "output_shape": [
+      3,
+      3
+    ],
+    "input_values": [
+      0,
+      1
+    ],
+    "output_values": [
+      0,
+      1
+    ],
+    "num_examples": 2,
+    "insights": [],
+    "patterns": [],
+    "complexity_estimate": 0.5
+  },
+  "patterns": [
+    {
+      "pattern": "Inadequate Step Definitions: The strategies repeatedly exhibit missing or excessively short step details, particularly with empty type fields and parameter dictionaries, leading to failure in execution.",
+      "confidence": 0.95
+    },
+    {
+      "pattern": "Duplicate Strategy Entries: The identical strategy IDs and descriptions indicate a pattern where error outputs are duplicated rather than diversely generated.",
+      "confidence": 0.9
+    }
+  ],
+  "success": true,
+  "input_size": 3
+}

@@ -1,11 +1,11 @@
 from typing import Dict, List, Any, Optional, Set
 from dataclasses import dataclass
 import numpy as np
-from src.concept_formation.concept_extractor import ConceptExtractor
+from ..concept_formation.concept_extractor import ConceptExtractor
 import json
-from src.utils.json_validator import JSONValidator
-from src.utils.validators import SystemValidators, ValidationError
-from src.llm.llm_interface import LLMInterface
+from ..utils.json_validator import JSONValidator
+from ..utils.validators import SystemValidators, ValidationError
+from ..llm.llm_interface import LLMInterface
 import time
 import logging
 
@@ -18,65 +18,118 @@ class ConceptValidation:
     feedback: str
 
 class PatternAbstractor:
+    ABSTRACTION_SCHEMA = {
+        "type": "object",
+        "required": ["concepts", "confidence", "explanation"],
+        "properties": {
+            "concepts": {
+                "type": "array",
+                "items": {"type": "string"}
+            },
+            "confidence": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0
+            },
+            "explanation": {"type": "string"}
+        }
+    }
+    
+    RELATIONSHIP_SCHEMA = {
+        "type": "object",
+        "required": ["relationship", "confidence", "explanation"],
+        "properties": {
+            "relationship": {"type": "string"},
+            "confidence": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0
+            },
+            "explanation": {"type": "string"}
+        }
+    }
+    
     def __init__(self, llm: LLMInterface):
         self.llm = llm
         self.abstractions = {}
         
     async def abstract_patterns(self, patterns: Dict[str, Any]) -> Dict[str, Any]:
         """Abstract higher-level patterns from observed patterns."""
-        # Use LLM to find abstractions
-        analysis = await self.llm.analyze_pattern({
-            'train': [{
-                'input': patterns['input'],
-                'output': patterns['output']
-            }],
-            'analysis_type': 'abstraction'
-        })
-        
-        # Extract concepts and confidence
-        concepts = []
-        confidence = 0.0
-        
-        if analysis and hasattr(analysis, 'text'):
-            try:
-                result = json.loads(analysis.text)
-                concepts = result.get('concepts', [])
-                confidence = result.get('confidence', 0.0)
-            except json.JSONDecodeError:
-                pass
-        
-        # Store abstractions
-        abstractions = {
-            'concepts': concepts,
-            'confidence': confidence,
-            'relationships': await self._find_relationships(patterns)
-        }
-        
-        return abstractions
+        prompt = f"""Analyze these patterns and identify higher-level abstractions.
+Return your analysis in the following JSON format:
+{{
+    "concepts": ["list of abstracted concepts"],
+    "confidence": 0.0-1.0,
+    "explanation": "why these abstractions make sense"
+}}
+
+Patterns to analyze:
+{json.dumps(patterns, indent=2)}"""
+
+        try:
+            response = await self.llm.get_completion(prompt, schema=self.ABSTRACTION_SCHEMA)
+            result = json.loads(response)
+            
+            # Store abstractions
+            abstractions = {
+                'concepts': result['concepts'],
+                'confidence': result['confidence'],
+                'relationships': await self._find_relationships(patterns)
+            }
+            
+            return abstractions
+            
+        except Exception as e:
+            logger.error(f"Error in pattern abstraction: {str(e)}")
+            return {
+                'concepts': [],
+                'confidence': 0.0,
+                'relationships': []
+            }
         
     async def _find_relationships(self, patterns: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Find relationships between patterns."""
         relationships = []
         for i, p1 in enumerate(patterns):
             for j, p2 in enumerate(patterns[i+1:], i+1):
-                # Use LLM to analyze relationship
-                analysis = await self.llm.analyze_pattern({
-                    'pattern1': p1,
-                    'pattern2': p2,
-                    'task': 'relationship'
-                })
+                prompt = f"""Analyze the relationship between these two patterns.
+Return your analysis in the following JSON format:
+{{
+    "relationship": "description of relationship",
+    "confidence": 0.0-1.0,
+    "explanation": "why this relationship exists"
+}}
+
+Pattern 1:
+{json.dumps(p1, indent=2)}
+
+Pattern 2:
+{json.dumps(p2, indent=2)}"""
                 
-                if analysis and hasattr(analysis, 'text'):
-                    try:
-                        result = json.loads(analysis.text)
-                        if result.get('relationship'):
-                            relationships.append(result)
-                    except json.JSONDecodeError:
-                        continue
+                try:
+                    response = await self.llm.get_completion(prompt, schema=self.RELATIONSHIP_SCHEMA)
+                    result = json.loads(response)
+                    relationships.append(result)
+                except Exception as e:
+                    logger.error(f"Error finding relationship: {str(e)}")
+                    continue
                         
         return relationships
 
 class ConceptValidator:
+    CONSISTENCY_SCHEMA = {
+        "type": "object",
+        "required": ["score", "explanation"],
+        "properties": {
+            "score": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0
+            },
+            "explanation": {"type": "string"}
+        }
+    }
+    
     def __init__(self, llm: LLMInterface, confidence_threshold: float = 0.7):
         self.llm = llm
         self.validations = {}
@@ -149,20 +202,24 @@ Return response in this exact JSON format:
             return 0.0
             
         # Use LLM to check consistency
-        prompt = f"""Check if this concept is consistent across examples:
+        prompt = f"""Check if this concept is consistent across examples.
+Return your analysis in the following JSON format:
+{{
+    "score": 0.0-1.0,      # How consistent the concept is
+    "explanation": "string" # Why you gave this score
+}}
 
 Concept:
 {json.dumps(concept, indent=2)}
 
 Examples:
-{json.dumps(examples, indent=2)}
-
-Return a score between 0.0 and 1.0."""
+{json.dumps(examples, indent=2)}"""
 
         try:
-            response = await self.llm.get_completion(prompt)
-            return float(response.strip())
-        except (ValueError, AttributeError):
+            response = await self.llm.get_completion(prompt, schema=self.CONSISTENCY_SCHEMA)
+            result = json.loads(response)
+            return result["score"]
+        except (ValueError, AttributeError, json.JSONDecodeError):
             return 0.0
             
     async def _supports_concept(self, concept: Dict[str, Any], 
